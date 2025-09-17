@@ -1,11 +1,12 @@
 import uuid
 import os
-import bot_logic # <--- THIS LINE WAS ADDED
+import bot_logic
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Annotated
 from pydantic.functional_validators import AfterValidator
+from fastapi.middleware.cors import CORSMiddleware # <--- 1. IMPORT THE MIDDLEWARE
 
 # Pydantic doesn't have a built-in HttpUrl type anymore, so we use a simple validator
 def check_url(url: str) -> str:
@@ -16,6 +17,20 @@ def check_url(url: str) -> str:
 GoogleMeetUrl = Annotated[str, AfterValidator(check_url)]
 
 app = FastAPI()
+
+# --- 2. ADD THE MIDDLEWARE CONFIGURATION ---
+# This allows requests from any origin. For production, you might want to restrict this
+# to your actual frontend's domain.
+origins = ["*"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"], # Allows all methods (GET, POST, etc.)
+    allow_headers=["*"], # Allows all headers
+)
+# -----------------------------------------
 
 # In-memory dictionary to store job statuses.
 jobs = {}
