@@ -1,5 +1,6 @@
 import uuid
 import os
+import bot_logic # <--- THIS LINE WAS ADDED
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -29,10 +30,10 @@ async def start_meeting(request: MeetingRequest, background_tasks: BackgroundTas
     """
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "pending"}
-    
+
     # Run the bot in the background
     background_tasks.add_task(bot_logic.run_bot_task, request.meeting_url, job_id, jobs)
-    
+
     return {"message": "Meeting bot started.", "job_id": job_id}
 
 @app.get("/status/{job_id}")
@@ -53,7 +54,7 @@ async def get_transcript(job_id: str):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     if job.get("status") != "completed":
         raise HTTPException(status_code=400, detail=f"Job is not complete. Current status: {job.get('status')}")
 
