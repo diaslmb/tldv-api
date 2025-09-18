@@ -13,7 +13,6 @@ class WorkflowAgentProcessor:
         self.headers = {"Authorization": f"Bearer {self.api_key}"}
 
     async def upload_file(self, filepath: str) -> str:
-        """Uploads one .txt file and returns its file_id"""
         url = f"{self.base_url}/files/upload"
         filename = os.path.basename(filepath)
         try:
@@ -31,39 +30,46 @@ class WorkflowAgentProcessor:
             return None
 
     async def run_workflow(self, file_id: str, output_pdf_path: str) -> bool:
-        """Runs the workflow by sending the file_id to the 'text' input variable."""
         url = f"{self.base_url}/workflows/run"
-        
         payload = {
             "user": "user",
             "response_mode": "blocking",
             "inputs": {
-                "text": [
-                    {
-                        "type": "document",
-                        # --- TYPO CORRECTED HERE ---
-                        "transfer_method": "local_file",
-                        "upload_file_id": file_id
-                    }
-                ]
+                "text": [{"type": "document", "transfer_method": "local_file", "upload_file_id": file_id}]
             }
         }
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(600.0)) as client:
-                async with client.stream("POST", url, headers=self.headers, json=payload) as response:
-                    response.raise_for_status()
+                # 1. Run the workflow and get the JSON response
+                response = await client.post(url, headers=self.headers, json=payload)
+                response.raise_for_status()
+                response_data = response.json()
+
+                # 2. Extract the file URL from the JSON response
+                outputs = response_data.get("data", {}).get("outputs", {})
+                if "summary" in outputs and outputs["summary"]:
+                    file_info = outputs["summary"][0]
+                    download_url = file_info.get("url")
                     
-                    if "application/pdf" in response.headers.get("content-type", ""):
+                    if not download_url:
+                        logger.error("Could not find download URL in workflow response.")
+                        return False
+
+                    # 3. Download the actual PDF file from the URL
+                    full_download_url = f"https://shai.pro{download_url}"
+                    logger.info(f"Downloading summary from {full_download_url}")
+                    
+                    async with client.stream("GET", full_download_url, headers=self.headers) as download_response:
+                        download_response.raise_for_status()
                         with open(output_pdf_path, "wb") as f:
-                            async for chunk in response.aiter_bytes():
+                            async for chunk in download_response.aiter_bytes():
                                 f.write(chunk)
                         logger.success(f"Successfully saved PDF summary to {output_pdf_path}")
                         return True
-                    else:
-                        error_text = await response.aread()
-                        logger.error(f"Workflow did not return a PDF. Response: {error_text.decode()}")
-                        return False
+                else:
+                    logger.error("Workflow response did not contain the expected 'summary' output.")
+                    return False
         except Exception as e:
-            logger.error(f"Workflow run failed for file_id {file_id}: {e}")
+            logger.error(f"Workflow run or download failed for file_id {file_id}: {e}")
             return False
