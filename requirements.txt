@@ -3,3 +3,5 @@ uvicorn[standard]
 playwright
 requests
 pydantic
+httpx
+loguru
