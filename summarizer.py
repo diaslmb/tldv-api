@@ -13,10 +13,8 @@ class WorkflowAgentProcessor:
         self.headers = {"Authorization": f"Bearer {self.api_key}"}
 
     async def upload_file(self, filepath: str) -> str:
-        """Uploads one .txt file and returns its file_id"""
         url = f"{self.base_url}/files/upload"
         filename = os.path.basename(filepath)
-
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 with open(filepath, "rb") as f:
@@ -32,17 +30,15 @@ class WorkflowAgentProcessor:
             return None
 
     async def run_workflow(self, file_id: str, output_pdf_path: str) -> bool:
-        """Runs the workflow with the uploaded file and saves the resulting PDF."""
         url = f"{self.base_url}/workflows/run"
         
-        # --- THIS PAYLOAD HAS BEEN CORRECTED ---
-        # The file is now passed inside the 'inputs' object, linked to the
-        # variable name from your workflow (assumed to be 'file').
+        # --- CHANGE THE VARIABLE NAME IN THIS PAYLOAD ---
         payload = {
             "user": "user",
             "response_mode": "blocking",
             "inputs": {
-                "file": [
+                # Replace "YOUR_VARIABLE_NAME_HERE" with the actual name from your SHAI workflow's Start node.
+                "text": [
                     {
                         "type": "document",
                         "transfer_method": "local_file",
@@ -51,7 +47,7 @@ class WorkflowAgentProcessor:
                 ]
             }
         }
-        # ------------------------------------
+        # ---------------------------------------------
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(600.0)) as client:
@@ -68,7 +64,6 @@ class WorkflowAgentProcessor:
                         error_text = await response.aread()
                         logger.error(f"Workflow did not return a PDF. Response: {error_text.decode()}")
                         return False
-
         except Exception as e:
             logger.error(f"Workflow run failed for file_id {file_id}: {e}")
             return False
