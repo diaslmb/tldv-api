@@ -89,14 +89,16 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await asyncio.sleep(10)
 
             while True:
-                await asyncio.sleep(15)
+                # --- THIS IS THE LINE THAT WAS CHANGED ---
+                await asyncio.sleep(4) # Check every 4 seconds for better responsiveness
+                
                 try:
                     if job_status.get(job_id, {}).get("status") == "stopping":
                         print("Stop signal received, leaving meeting.")
                         break
 
                     locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
-                    await locator.wait_for(state="visible", timeout=5000)
+                    await locator.wait_for(state="visible", timeout=3000) # Reduced timeout slightly
                     count_text = await locator.get_attribute("aria-label")
                     match = re.search(r'\d+', count_text)
                     if match and int(match.group()) <= 1:
@@ -119,10 +121,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             except Exception: pass
             
             await browser.close()
-
-    # --- THIS IS THE SECTION THAT HAS BEEN REMOVED ---
-    # By removing the block below, the code will now continue to the
-    # transcription step even after a manual stop.
 
     if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 1024:
         job_status[job_id] = {"status": "transcribing"}
