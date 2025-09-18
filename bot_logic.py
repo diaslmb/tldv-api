@@ -42,12 +42,8 @@ def transcribe_audio(audio_path, transcript_path):
         return False
 
 async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
-    """
-    Main bot logic, refactored to be called as a background task.
-    """
-    import sys  # Import sys here for platform check
+    import sys
     
-    # Create a unique directory for this job's output
     output_dir = os.path.join("outputs", job_id)
     os.makedirs(output_dir, exist_ok=True)
     output_audio_path = os.path.join(output_dir, "meeting_audio.wav")
@@ -77,8 +73,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             try:
                 await page.get_by_role("button", name="Turn off microphone").click(timeout=10000)
                 await page.get_by_role("button", name="Turn off camera").click(timeout=10000)
-            except Exception:
-                pass # Continue if buttons not found
+            except Exception: pass
 
             join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
             await join_button_locator.wait_for(timeout=15000)
@@ -89,14 +84,19 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
             try:
                 await page.get_by_role("button", name="Got it").click(timeout=15000)
-            except TimeoutError:
-                pass # Continue if pop-up not found
+            except TimeoutError: pass
             
-            await asyncio.sleep(10) # UI stabilization delay
+            await asyncio.sleep(10)
 
             while True:
-                await asyncio.sleep(15) # Check every 15 seconds
+                await asyncio.sleep(15)
                 try:
+                    # --- NEW: Check for stop signal ---
+                    if job_status.get(job_id, {}).get("status") == "stopping":
+                        print("Stop signal received, leaving meeting.")
+                        break
+                    # ----------------------------------
+
                     locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
                     await locator.wait_for(state="visible", timeout=5000)
                     count_text = await locator.get_attribute("aria-label")
@@ -118,10 +118,14 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             try:
                 await page.get_by_role("button", name="Leave call").click(timeout=5000)
                 await asyncio.sleep(3)
-            except Exception:
-                pass
+            except Exception: pass
             
             await browser.close()
+
+    # Don't transcribe if the job was manually stopped
+    if job_status.get(job_id, {}).get("status") == "stopping":
+        job_status[job_id]["error"] = "Meeting was stopped manually by user."
+        return
 
     if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 1024:
         job_status[job_id] = {"status": "transcribing"}
