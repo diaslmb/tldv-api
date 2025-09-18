@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Annotated
 from pydantic.functional_validators import AfterValidator
-from fastapi.middleware.cors import CORSMiddleware # <--- 1. IMPORT THE MIDDLEWARE
+from fastapi.middleware.cors import CORSMiddleware
 
 # Pydantic doesn't have a built-in HttpUrl type anymore, so we use a simple validator
 def check_url(url: str) -> str:
@@ -18,19 +18,14 @@ GoogleMeetUrl = Annotated[str, AfterValidator(check_url)]
 
 app = FastAPI()
 
-# --- 2. ADD THE MIDDLEWARE CONFIGURATION ---
-# This allows requests from any origin. For production, you might want to restrict this
-# to your actual frontend's domain.
 origins = ["*"]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"], # Allows all methods (GET, POST, etc.)
-    allow_headers=["*"], # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-# -----------------------------------------
 
 # In-memory dictionary to store job statuses.
 jobs = {}
@@ -40,22 +35,31 @@ class MeetingRequest(BaseModel):
 
 @app.post("/start-meeting")
 async def start_meeting(request: MeetingRequest, background_tasks: BackgroundTasks):
-    """
-    Starts the meeting bot in a background task.
-    """
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "pending"}
-
-    # Run the bot in the background
     background_tasks.add_task(bot_logic.run_bot_task, request.meeting_url, job_id, jobs)
-
     return {"message": "Meeting bot started.", "job_id": job_id}
+
+# --- NEW ENDPOINT ADDED HERE ---
+@app.post("/stop-meeting/{job_id}")
+async def stop_meeting(job_id: str):
+    """
+    Signals the bot to gracefully exit the meeting.
+    """
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Only signal to stop if it's in an active state
+    if job.get("status") in ["starting_browser", "navigating", "recording"]:
+        jobs[job_id]["status"] = "stopping"
+        return {"message": "Stop signal sent to bot."}
+    
+    return {"message": f"Bot is not in an active state to be stopped. Current status: {job.get('status')}"}
+# --------------------------------
 
 @app.get("/status/{job_id}")
 async def get_status(job_id: str):
-    """
-    Checks the status of a running job.
-    """
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -63,13 +67,10 @@ async def get_status(job_id: str):
 
 @app.get("/transcript/{job_id}")
 async def get_transcript(job_id: str):
-    """
-    Retrieves the transcript file for a completed job.
-    """
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-
+    
     if job.get("status") != "completed":
         raise HTTPException(status_code=400, detail=f"Job is not complete. Current status: {job.get('status')}")
 
