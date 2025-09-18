@@ -34,7 +34,6 @@ class WorkflowAgentProcessor:
         """Runs the workflow by sending the file_id to the 'text' input variable."""
         url = f"{self.base_url}/workflows/run"
         
-        # This payload now correctly sends the file object to the 'text' variable.
         payload = {
             "user": "user",
             "response_mode": "blocking",
@@ -42,7 +41,8 @@ class WorkflowAgentProcessor:
                 "text": [
                     {
                         "type": "document",
-                        "transfer_method": "local__file",
+                        # --- TYPO CORRECTED HERE ---
+                        "transfer_method": "local_file",
                         "upload_file_id": file_id
                     }
                 ]
