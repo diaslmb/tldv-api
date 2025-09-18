@@ -69,7 +69,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         try:
             job_status[job_id] = {"status": "navigating"}
             await page.goto(meeting_url, timeout=60000)
-            await page.locator('input[placeholder="Your name"]').fill("NoteTaker Bot")
+            await page.locator('input[placeholder="Your name"]').fill("SHAI.PRO Notetaker")
             
             try:
                 await page.get_by_role("button", name="Turn off microphone").click(timeout=10000)
