@@ -79,3 +79,21 @@ async def get_transcript(job_id: str):
         raise HTTPException(status_code=404, detail="Transcript file not found.")
 
     return FileResponse(transcript_path, media_type='text/plain', filename='transcript.txt')
+
+@app.get("/summary/{job_id}")
+async def get_summary(job_id: str):
+    """
+    Retrieves the PDF summary file for a completed job.
+    """
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    if job.get("status") != "completed":
+        raise HTTPException(status_code=400, detail=f"Job is not complete. Current status: {job.get('status')}")
+
+    summary_path = job.get("summary_path")
+    if not summary_path or not os.path.exists(summary_path):
+        raise HTTPException(status_code=404, detail="Summary file not found.")
+
+    return FileResponse(summary_path, media_type='application/pdf', filename='summary.pdf')
