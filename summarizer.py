@@ -21,7 +21,7 @@ class WorkflowAgentProcessor:
             async with httpx.AsyncClient(timeout=120) as client:
                 with open(filepath, "rb") as f:
                     files = {"file": (filename, f, "text/plain")}
-                    data = {"user": "user"} # Workflow doesn't need 'type'
+                    data = {"user": "user"}
                     response = await client.post(url, headers=self.headers, files=files, data=data)
                     response.raise_for_status()
                     file_id = response.json().get("id")
@@ -34,20 +34,30 @@ class WorkflowAgentProcessor:
     async def run_workflow(self, file_id: str, output_pdf_path: str) -> bool:
         """Runs the workflow with the uploaded file and saves the resulting PDF."""
         url = f"{self.base_url}/workflows/run"
+        
+        # --- THIS PAYLOAD HAS BEEN CORRECTED ---
+        # The file is now passed inside the 'inputs' object, linked to the
+        # variable name from your workflow (assumed to be 'file').
         payload = {
             "user": "user",
             "response_mode": "blocking",
-            "inputs": {},
-            "files": [{"upload_file_id": file_id}]
+            "inputs": {
+                "file": [
+                    {
+                        "type": "document",
+                        "transfer_method": "local_file",
+                        "upload_file_id": file_id
+                    }
+                ]
+            }
         }
+        # ------------------------------------
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(600.0)) as client:
                 async with client.stream("POST", url, headers=self.headers, json=payload) as response:
                     response.raise_for_status()
                     
-                    # A workflow can return multiple files, we look for the PDF
-                    content_disposition = response.headers.get("content-disposition")
                     if "application/pdf" in response.headers.get("content-type", ""):
                         with open(output_pdf_path, "wb") as f:
                             async for chunk in response.aiter_bytes():
@@ -55,7 +65,6 @@ class WorkflowAgentProcessor:
                         logger.success(f"Successfully saved PDF summary to {output_pdf_path}")
                         return True
                     else:
-                        # Handle cases where the output is not a PDF (e.g., an error message)
                         error_text = await response.aread()
                         logger.error(f"Workflow did not return a PDF. Response: {error_text.decode()}")
                         return False
