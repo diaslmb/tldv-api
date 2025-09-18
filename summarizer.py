@@ -12,42 +12,25 @@ class WorkflowAgentProcessor:
         self.api_key = api_key
         self.headers = {"Authorization": f"Bearer {self.api_key}"}
 
-    async def upload_file(self, filepath: str) -> str:
-        url = f"{self.base_url}/files/upload"
-        filename = os.path.basename(filepath)
-        try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                with open(filepath, "rb") as f:
-                    files = {"file": (filename, f, "text/plain")}
-                    data = {"user": "user"}
-                    response = await client.post(url, headers=self.headers, files=files, data=data)
-                    response.raise_for_status()
-                    file_id = response.json().get("id")
-                    logger.info(f"Uploaded {filename} -> {file_id}")
-                    return file_id
-        except Exception as e:
-            logger.error(f"Upload failed for {filename}: {e}")
-            return None
-
-    async def run_workflow(self, file_id: str, output_pdf_path: str) -> bool:
+    async def run_workflow_with_text(self, transcript_path: str, output_pdf_path: str) -> bool:
+        """Reads a text file and runs the workflow with its content."""
         url = f"{self.base_url}/workflows/run"
         
-        # --- CHANGE THE VARIABLE NAME IN THIS PAYLOAD ---
+        try:
+            with open(transcript_path, "r", encoding="utf-8") as f:
+                transcript_content = f.read()
+        except Exception as e:
+            logger.error(f"Failed to read transcript file at {transcript_path}: {e}")
+            return False
+
+        # The payload now sends the transcript content directly to the "text" variable
         payload = {
             "user": "user",
             "response_mode": "blocking",
             "inputs": {
-                # Replace "YOUR_VARIABLE_NAME_HERE" with the actual name from your SHAI workflow's Start node.
-                "text": [
-                    {
-                        "type": "document",
-                        "transfer_method": "local_file",
-                        "upload_file_id": file_id
-                    }
-                ]
+                "text": transcript_content
             }
         }
-        # ---------------------------------------------
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(600.0)) as client:
@@ -65,5 +48,5 @@ class WorkflowAgentProcessor:
                         logger.error(f"Workflow did not return a PDF. Response: {error_text.decode()}")
                         return False
         except Exception as e:
-            logger.error(f"Workflow run failed for file_id {file_id}: {e}")
+            logger.error(f"Workflow run failed: {e}")
             return False
