@@ -91,11 +91,9 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             while True:
                 await asyncio.sleep(15)
                 try:
-                    # --- NEW: Check for stop signal ---
                     if job_status.get(job_id, {}).get("status") == "stopping":
                         print("Stop signal received, leaving meeting.")
                         break
-                    # ----------------------------------
 
                     locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
                     await locator.wait_for(state="visible", timeout=5000)
@@ -122,10 +120,9 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             await browser.close()
 
-    # Don't transcribe if the job was manually stopped
-    if job_status.get(job_id, {}).get("status") == "stopping":
-        job_status[job_id]["error"] = "Meeting was stopped manually by user."
-        return
+    # --- THIS IS THE SECTION THAT HAS BEEN REMOVED ---
+    # By removing the block below, the code will now continue to the
+    # transcription step even after a manual stop.
 
     if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 1024:
         job_status[job_id] = {"status": "transcribing"}
