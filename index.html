@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meeting Bot Frontend</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 40px auto; }
+        input { width: 100%; padding: 8px; margin-bottom: 10px; box-sizing: border-box; }
+        button { padding: 10px 15px; margin-right: 10px; cursor: pointer; border-radius: 5px; border: 1px solid #ccc; }
+        button:disabled { cursor: not-allowed; opacity: 0.6; }
+        #startBtn { background-color: #5bc0de; color: white; border-color: #46b8da;}
+        #stopBtn { background-color: #d9534f; color: white; border-color: #d43f3a; }
+        #summaryBtn { background-color: #5cb85c; color: white; border-color: #4cae4c; }
+        #status { margin-top: 20px; font-style: italic; color: #555; }
+        #transcript { margin-top: 20px; white-space: pre-wrap; background-color: #f4f4f4; padding: 15px; border-radius: 5px; }
+    </style>
+</head>
+<body>
+
+    <h1>Meeting Transcription Bot</h1>
+    <p>Enter a Google Meet URL to begin recording and transcription.</p>
+
+    <input type="text" id="meetUrl" placeholder="https://meet.google.com/xxx-yyyy-zzz">
+    <button id="startBtn" onclick="startJob()">Start Transcription</button>
+    <button id="stopBtn" onclick="stopJob()" style="display: none;">Stop Bot</button>
+    <button id="summaryBtn" onclick="downloadSummary()" style="display: none;">Download Summary</button>
+
+    <div id="status"></div>
+    <pre id="transcript"></pre>
+
+    <script>
+        const API_BASE_URL = "https://rmd45v6y96ydnh-8080.proxy.runpod.net";
+
+        const statusDiv = document.getElementById('status');
+        const transcriptDiv = document.getElementById('transcript');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const summaryBtn = document.getElementById('summaryBtn');
+        
+        let currentJobId = null;
+        let pollingInterval = null;
+
+        function showActionButtons(isJobRunning) {
+            stopBtn.style.display = isJobRunning ? 'inline-block' : 'none';
+            startBtn.disabled = isJobRunning;
+            summaryBtn.style.display = 'none'; // Always hide summary button initially
+        }
+
+        async function startJob() {
+            const meetingUrl = document.getElementById('meetUrl').value;
+            if (!meetingUrl) {
+                alert("Please enter a meeting URL.");
+                return;
+            }
+
+            statusDiv.textContent = "Starting bot...";
+            transcriptDiv.textContent = "";
+            showActionButtons(true);
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/start-meeting`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ meeting_url: meetingUrl })
+                });
+                const data = await response.json();
+                if (!response.ok) { throw new Error(data.detail || "Failed to start job."); }
+
+                currentJobId = data.job_id;
+                statusDiv.textContent = `Job started with ID: ${currentJobId}. Waiting for completion...`;
+                pollForStatus(currentJobId);
+            } catch (error) {
+                statusDiv.textContent = `Error: ${error.message}`;
+                showActionButtons(false);
+            }
+        }
+
+        async function stopJob() {
+            if (!currentJobId) return;
+
+            statusDiv.textContent = "Sending stop signal...";
+            try {
+                const response = await fetch(`${API_BASE_URL}/stop-meeting/${currentJobId}`, { method: 'POST' });
+                const data = await response.json();
+                statusDiv.textContent = data.message;
+            } catch (error) {
+                statusDiv.textContent = `Error stopping job: ${error.message}`;
+            }
+        }
+
+        function pollForStatus(jobId) {
+            if (pollingInterval) clearInterval(pollingInterval);
+
+            pollingInterval = setInterval(async () => {
+                if (!jobId) {
+                    clearInterval(pollingInterval);
+                    return;
+                }
+                try {
+                    const response = await fetch(`${API_BASE_URL}/status/${jobId}`);
+                    const data = await response.json();
+                    statusDiv.textContent = `Current status: ${data.status}`;
+                    
+                    const isJobFinished = data.status === 'completed' || data.status === 'failed';
+                    
+                    if (isJobFinished) {
+                        clearInterval(pollingInterval);
+                        showActionButtons(false);
+                        if(data.status === 'completed') {
+                           if(data.summary_path) {
+                               summaryBtn.style.display = 'inline-block';
+                           }
+                           fetchTranscript(jobId);
+                        } else { // status === 'failed'
+                            statusDiv.textContent = `Job failed. Error: ${data.error}`;
+                        }
+                    }
+                } catch (error) {
+                    clearInterval(pollingInterval);
+                    showActionButtons(false);
+                    statusDiv.textContent = `Error checking status: ${error.message}`;
+                }
+            }, 5000);
+        }
+
+        async function downloadSummary() {
+            if (!currentJobId) return;
+            const link = document.createElement('a');
+            link.href = `${API_BASE_URL}/summary/${currentJobId}`;
+            link.setAttribute('download', 'summary.pdf');
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        async function fetchTranscript(jobId) {
+            try {
+                statusDiv.textContent = "Job completed! Fetching transcript...";
+                const response = await fetch(`${API_BASE_URL}/transcript/${jobId}`);
+                if (!response.ok) { throw new Error("Failed to fetch transcript file."); }
+                const transcriptText = await response.text();
+                transcriptDiv.textContent = transcriptText;
+                statusDiv.textContent = "Transcript loaded successfully!";
+            } catch (error) {
+                statusDiv.textContent = `Error fetching transcript: ${error.message}`;
+            }
+        }
+    </script>
+
+</body>
+</html>
