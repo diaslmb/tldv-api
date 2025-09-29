@@ -8,13 +8,13 @@ from typing import Annotated
 from pydantic.functional_validators import AfterValidator
 from fastapi.middleware.cors import CORSMiddleware
 
-# Pydantic doesn't have a built-in HttpUrl type anymore, so we use a simple validator
+# Pydantic validator to check for a valid meeting URL
 def check_url(url: str) -> str:
-    if "meet.google.com" not in url:
-        raise ValueError("URL must be a valid Google Meet link")
+    if "meet.google.com" not in url and "teams.microsoft.com" not in url:
+        raise ValueError("URL must be a valid Google Meet or Microsoft Teams link")
     return url
 
-GoogleMeetUrl = Annotated[str, AfterValidator(check_url)]
+MeetingUrl = Annotated[str, AfterValidator(check_url)]
 
 app = FastAPI()
 
@@ -31,7 +31,7 @@ app.add_middleware(
 jobs = {}
 
 class MeetingRequest(BaseModel):
-    meeting_url: GoogleMeetUrl
+    meeting_url: MeetingUrl
 
 @app.post("/start-meeting")
 async def start_meeting(request: MeetingRequest, background_tasks: BackgroundTasks):
@@ -40,7 +40,6 @@ async def start_meeting(request: MeetingRequest, background_tasks: BackgroundTas
     background_tasks.add_task(bot_logic.run_bot_task, request.meeting_url, job_id, jobs)
     return {"message": "Meeting bot started.", "job_id": job_id}
 
-# --- NEW ENDPOINT ADDED HERE ---
 @app.post("/stop-meeting/{job_id}")
 async def stop_meeting(job_id: str):
     """
@@ -50,13 +49,11 @@ async def stop_meeting(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # Only signal to stop if it's in an active state
     if job.get("status") in ["starting_browser", "navigating", "recording"]:
         jobs[job_id]["status"] = "stopping"
         return {"message": "Stop signal sent to bot."}
     
     return {"message": f"Bot is not in an active state to be stopped. Current status: {job.get('status')}"}
-# --------------------------------
 
 @app.get("/status/{job_id}")
 async def get_status(job_id: str):
