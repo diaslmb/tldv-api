@@ -49,7 +49,7 @@ async def join_google_meet(page):
         await page.get_by_role("button", name="Turn off microphone").click(timeout=10000)
         await page.get_by_role("button", name="Turn off camera").click(timeout=10000)
     except Exception:
-        pass  # Ignore if buttons are not found
+        pass
 
     join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
     await join_button_locator.wait_for(timeout=15000)
@@ -61,15 +61,33 @@ async def join_google_meet(page):
 
 async def join_microsoft_teams(page):
     """Handles the process of joining a Microsoft Teams meeting."""
-    # Turn off camera and microphone
-    await page.locator('[data-tid="toggle-video"]').click()
-    await page.locator('[data-tid="toggle-mic"]').click()
-    
+    try:
+        await page.wait_for_selector('[data-tid="toggle-video"]', timeout=30000)
+        
+        if await page.locator('[data-tid="toggle-video"][aria-pressed="true"]').is_visible(timeout=5000):
+            await page.locator('[data-tid="toggle-video"]').click()
+        if await page.locator('[data-tid="toggle-mic"][aria-pressed="true"]').is_visible(timeout=5000):
+            await page.locator('[data-tid="toggle-mic"]').click()
+    except TimeoutError:
+        print("Could not find media controls on pre-join screen, proceeding anyway.")
+
     await page.locator('input[placeholder="Type your name"]').fill(BOT_NAME)
     
     join_button_locator = page.get_by_role("button", name="Join now")
     await join_button_locator.wait_for(timeout=15000)
     await join_button_locator.click(timeout=15000)
+    
+    # --- NEW LOBBY HANDLING ---
+    try:
+        print("In the lobby, waiting to be admitted...")
+        # This selector looks for the main meeting controls, which only appear after being admitted.
+        await page.wait_for_selector('button[data-tid="microphone-button"]', timeout=300000) # Wait up to 5 minutes
+        print("Successfully admitted into the meeting.")
+    except TimeoutError:
+        # This will cause the bot to exit gracefully if not admitted.
+        raise Exception("Timed out waiting in the lobby after 5 minutes.")
+    # --- END LOBBY HANDLING ---
+
 
 async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
     import sys
@@ -99,10 +117,9 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             job_status[job_id] = {"status": "navigating"}
             await page.goto(meeting_url, timeout=60000)
             
-            # Platform-specific logic
             if "meet.google.com" in meeting_url:
                 await join_google_meet(page)
-            elif "teams.microsoft.com" in meeting_url:
+            elif "teams.microsoft.com" in meeting_url or "teams.live.com" in meeting_url:
                 await join_microsoft_teams(page)
 
             job_status[job_id] = {"status": "recording"}
@@ -118,9 +135,14 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         print("Stop signal received, leaving meeting.")
                         break
 
-                    locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
-                    await locator.wait_for(state="visible", timeout=3000)
-                    count_text = await locator.get_attribute("aria-label")
+                    # Using a more robust selector for participant count
+                    locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], #roster-button').first
+                    await locator.wait_for(state="visible", timeout=5000)
+                    
+                    count_text = await locator.get_attribute("aria-label") or ""
+                    if not re.search(r'\d+', count_text):
+                        count_text = await locator.inner_text()
+
                     match = re.search(r'\d+', count_text)
                     if match and int(match.group()) <= 1:
                         print("Only 1 participant left. Ending recording.")
@@ -137,8 +159,8 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 recorder.communicate()
             
             try:
-                # Use a more generic selector for the leave button
-                await page.locator('[aria-label*="Leave"], [aria-label*="Hang up"]').first.click(timeout=5000)
+                # More generic leave button selector
+                await page.locator('[aria-label*="Leave"], [aria-label*="Hang up"], #hangup-button').first.click(timeout=5000)
                 await asyncio.sleep(3)
             except Exception:
                 pass
@@ -166,4 +188,9 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         else:
             job_status[job_id] = {"status": "failed", "error": "Transcription failed"}
     else:
-        job_status[job_id] = {"status": "failed", "error": "Audio recording was empty or failed"}
+        # Provide a clearer error if the audio is empty because of a lobby timeout
+        job_error = job_status.get(job_id, {}).get("error")
+        if job_error and "Timed out waiting in the lobby" in str(job_error):
+            pass # The error is already specific enough
+        else:
+            job_status[job_id] = {"status": "failed", "error": "Audio recording was empty or failed"}
