@@ -4,12 +4,12 @@ import asyncio
 import subprocess
 from playwright.async_api import async_playwright, TimeoutError
 import requests
-import uuid
 from summarizer import WorkflowAgentProcessor
 
 # --- CONFIGURATION ---
 MAX_MEETING_DURATION_SECONDS = 10800
 WHISPERX_URL = "http://localhost:8000/v1/audio/transcriptions"
+BOT_NAME = "SHAI AI Notetaker"
 
 def get_ffmpeg_command(platform, duration, output_path):
     if platform.startswith("linux"):
@@ -42,6 +42,35 @@ def transcribe_audio(audio_path, transcript_path):
         print(f"An unexpected error occurred during transcription: {e}")
         return False
 
+async def join_google_meet(page):
+    """Handles the process of joining a Google Meet meeting."""
+    await page.locator('input[placeholder="Your name"]').fill(BOT_NAME)
+    try:
+        await page.get_by_role("button", name="Turn off microphone").click(timeout=10000)
+        await page.get_by_role("button", name="Turn off camera").click(timeout=10000)
+    except Exception:
+        pass  # Ignore if buttons are not found
+
+    join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
+    await join_button_locator.wait_for(timeout=15000)
+    await join_button_locator.click(timeout=15000)
+    try:
+        await page.get_by_role("button", name="Got it").click(timeout=15000)
+    except TimeoutError:
+        pass
+
+async def join_microsoft_teams(page):
+    """Handles the process of joining a Microsoft Teams meeting."""
+    # Turn off camera and microphone
+    await page.locator('[data-tid="toggle-video"]').click()
+    await page.locator('[data-tid="toggle-mic"]').click()
+    
+    await page.locator('input[placeholder="Type your name"]').fill(BOT_NAME)
+    
+    join_button_locator = page.get_by_role("button", name="Join now")
+    await join_button_locator.wait_for(timeout=15000)
+    await join_button_locator.click(timeout=15000)
+
 async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
     import sys
     
@@ -69,29 +98,20 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         try:
             job_status[job_id] = {"status": "navigating"}
             await page.goto(meeting_url, timeout=60000)
-            await page.locator('input[placeholder="Your name"]').fill("SHAI.PRO Notetaker")
             
-            try:
-                await page.get_by_role("button", name="Turn off microphone").click(timeout=10000)
-                await page.get_by_role("button", name="Turn off camera").click(timeout=10000)
-            except Exception: pass
+            # Platform-specific logic
+            if "meet.google.com" in meeting_url:
+                await join_google_meet(page)
+            elif "teams.microsoft.com" in meeting_url:
+                await join_microsoft_teams(page)
 
-            join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
-            await join_button_locator.wait_for(timeout=15000)
-            
             job_status[job_id] = {"status": "recording"}
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            await join_button_locator.click(timeout=15000)
 
-            try:
-                await page.get_by_role("button", name="Got it").click(timeout=15000)
-            except TimeoutError: pass
-            
             await asyncio.sleep(10)
 
             while True:
-                # --- THIS IS THE LINE THAT WAS CHANGED ---
-                await asyncio.sleep(4) # Check every 4 seconds for better responsiveness
+                await asyncio.sleep(4)
                 
                 try:
                     if job_status.get(job_id, {}).get("status") == "stopping":
@@ -99,7 +119,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         break
 
                     locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
-                    await locator.wait_for(state="visible", timeout=3000) # Reduced timeout slightly
+                    await locator.wait_for(state="visible", timeout=3000)
                     count_text = await locator.get_attribute("aria-label")
                     match = re.search(r'\d+', count_text)
                     if match and int(match.group()) <= 1:
@@ -117,9 +137,11 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 recorder.communicate()
             
             try:
-                await page.get_by_role("button", name="Leave call").click(timeout=5000)
+                # Use a more generic selector for the leave button
+                await page.locator('[aria-label*="Leave"], [aria-label*="Hang up"]').first.click(timeout=5000)
                 await asyncio.sleep(3)
-            except Exception: pass
+            except Exception:
+                pass
             
             await browser.close()
 
@@ -128,7 +150,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         transcription_success = transcribe_audio(output_audio_path, output_transcript_path)
         
         if transcription_success:
-            # --- SUMMARIZATION STEP ---
             job_status[job_id] = {"status": "summarizing"}
             summarizer = WorkflowAgentProcessor(base_url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
             
@@ -142,7 +163,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     job_status[job_id] = {"status": "failed", "error": "Summarization failed."}
             else:
                  job_status[job_id] = {"status": "failed", "error": "File upload for summarization failed."}
-            # --- END OF STEP ---
         else:
             job_status[job_id] = {"status": "failed", "error": "Transcription failed"}
     else:
