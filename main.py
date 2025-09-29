@@ -10,7 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Pydantic validator to check for a valid meeting URL
 def check_url(url: str) -> str:
-    if "meet.google.com" not in url and "teams.microsoft.com" not in url:
+    # ADDED "teams.live.com" to the check
+    if "meet.google.com" not in url and "teams.microsoft.com" not in url and "teams.live.com" not in url:
         raise ValueError("URL must be a valid Google Meet or Microsoft Teams link")
     return url
 
