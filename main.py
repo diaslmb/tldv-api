@@ -1,169 +1,96 @@
+import uuid
 import os
-import re
-import asyncio
-import subprocess
-from playwright.async_api import async_playwright, TimeoutError
-import requests
-from summarizer import WorkflowAgentProcessor
+import bot_logic
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from typing import Annotated
+from pydantic.functional_validators import AfterValidator
+from fastapi.middleware.cors import CORSMiddleware
 
-# --- CONFIGURATION ---
-MAX_MEETING_DURATION_SECONDS = 10800
-WHISPERX_URL = "http://localhost:8000/v1/audio/transcriptions"
-BOT_NAME = "SHAI AI Notetaker"
+# Pydantic validator to check for a valid meeting URL
+def check_url(url: str) -> str:
+    if "meet.google.com" not in url and "teams.microsoft.com" not in url:
+        raise ValueError("URL must be a valid Google Meet or Microsoft Teams link")
+    return url
 
-def get_ffmpeg_command(platform, duration, output_path):
-    if platform.startswith("linux"):
-        return ["ffmpeg", "-y", "-f", "pulse", "-i", "default", "-t", str(duration), output_path]
-    return None
+MeetingUrl = Annotated[str, AfterValidator(check_url)]
 
-def transcribe_audio(audio_path, transcript_path):
-    if not os.path.exists(audio_path):
-        print(f"❌ Audio file not found at {audio_path}")
-        return False
-    print(f"🎤 Sending {audio_path} to whisperx for transcription...")
-    try:
-        with open(audio_path, 'rb') as f:
-            files = {'file': (os.path.basename(audio_path), f)}
-            response = requests.post(WHISPERX_URL, files=files)
-        if response.status_code == 200:
-            transcript_data = response.json()
-            clean_transcript = transcript_data.get('text', '').replace('<br>', '\n')
-            with open(transcript_path, 'w') as f:
-                f.write(clean_transcript)
-            print(f"✅ Transcription successful. Saved to {transcript_path}")
-            return True
-        else:
-            print(f"❌ Transcription failed. Status code: {response.status_code}\n{response.text}")
-            return False
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Error connecting to whisperx service: {e}")
-        return False
-    except Exception as e:
-        print(f"An unexpected error occurred during transcription: {e}")
-        return False
+app = FastAPI()
 
-async def join_google_meet(page):
-    """Handles the process of joining a Google Meet meeting."""
-    await page.locator('input[placeholder="Your name"]').fill(BOT_NAME)
-    try:
-        await page.get_by_role("button", name="Turn off microphone").click(timeout=10000)
-        await page.get_by_role("button", name="Turn off camera").click(timeout=10000)
-    except Exception:
-        pass  # Ignore if buttons are not found
+origins = ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
-    await join_button_locator.wait_for(timeout=15000)
-    await join_button_locator.click(timeout=15000)
-    try:
-        await page.get_by_role("button", name="Got it").click(timeout=15000)
-    except TimeoutError:
-        pass
+# In-memory dictionary to store job statuses.
+jobs = {}
 
-async def join_microsoft_teams(page):
-    """Handles the process of joining a Microsoft Teams meeting."""
-    # Turn off camera and microphone
-    await page.locator('[data-tid="toggle-video"]').click()
-    await page.locator('[data-tid="toggle-mic"]').click()
+class MeetingRequest(BaseModel):
+    meeting_url: MeetingUrl
+
+@app.post("/start-meeting")
+async def start_meeting(request: MeetingRequest, background_tasks: BackgroundTasks):
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {"status": "pending"}
+    background_tasks.add_task(bot_logic.run_bot_task, request.meeting_url, job_id, jobs)
+    return {"message": "Meeting bot started.", "job_id": job_id}
+
+@app.post("/stop-meeting/{job_id}")
+async def stop_meeting(job_id: str):
+    """
+    Signals the bot to gracefully exit the meeting.
+    """
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.get("status") in ["starting_browser", "navigating", "recording"]:
+        jobs[job_id]["status"] = "stopping"
+        return {"message": "Stop signal sent to bot."}
     
-    await page.locator('input[placeholder="Type your name"]').fill(BOT_NAME)
+    return {"message": f"Bot is not in an active state to be stopped. Current status: {job.get('status')}"}
+
+@app.get("/status/{job_id}")
+async def get_status(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+@app.get("/transcript/{job_id}")
+async def get_transcript(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
     
-    join_button_locator = page.get_by_role("button", name="Join now")
-    await join_button_locator.wait_for(timeout=15000)
-    await join_button_locator.click(timeout=15000)
+    if job.get("status") != "completed":
+        raise HTTPException(status_code=400, detail=f"Job is not complete. Current status: {job.get('status')}")
 
-async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
-    import sys
+    transcript_path = job.get("transcript_path")
+    if not transcript_path or not os.path.exists(transcript_path):
+        raise HTTPException(status_code=404, detail="Transcript file not found.")
+
+    return FileResponse(transcript_path, media_type='text/plain', filename='transcript.txt')
+
+@app.get("/summary/{job_id}")
+async def get_summary(job_id: str):
+    """
+    Retrieves the PDF summary file for a completed job.
+    """
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
     
-    output_dir = os.path.join("outputs", job_id)
-    os.makedirs(output_dir, exist_ok=True)
-    output_audio_path = os.path.join(output_dir, "meeting_audio.wav")
-    output_transcript_path = os.path.join(output_dir, "transcript.txt")
-    
-    ffmpeg_command = get_ffmpeg_command(sys.platform, MAX_MEETING_DURATION_SECONDS, output_audio_path)
-    if not ffmpeg_command:
-        job_status[job_id] = {"status": "failed", "error": "Unsupported OS"}
-        return
+    if job.get("status") != "completed":
+        raise HTTPException(status_code=400, detail=f"Job is not complete. Current status: {job.get('status')}")
 
-    job_status[job_id] = {"status": "starting_browser"}
-    async with async_playwright() as p:
-        try:
-            browser = await p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"])
-            context = await browser.new_context(permissions=["microphone", "camera"])
-            page = await context.new_page()
-        except Exception as e:
-            job_status[job_id] = {"status": "failed", "error": f"Failed to launch browser: {e}"}
-            return
-            
-        recorder = None
-        try:
-            job_status[job_id] = {"status": "navigating"}
-            await page.goto(meeting_url, timeout=60000)
-            
-            # Platform-specific logic
-            if "meet.google.com" in meeting_url:
-                await join_google_meet(page)
-            elif "teams.microsoft.com" in meeting_url:
-                await join_microsoft_teams(page)
+    summary_path = job.get("summary_path")
+    if not summary_path or not os.path.exists(summary_path):
+        raise HTTPException(status_code=404, detail="Summary file not found.")
 
-            job_status[job_id] = {"status": "recording"}
-            recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-            await asyncio.sleep(10)
-
-            while True:
-                await asyncio.sleep(4)
-                
-                try:
-                    if job_status.get(job_id, {}).get("status") == "stopping":
-                        print("Stop signal received, leaving meeting.")
-                        break
-
-                    locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
-                    await locator.wait_for(state="visible", timeout=3000)
-                    count_text = await locator.get_attribute("aria-label")
-                    match = re.search(r'\d+', count_text)
-                    if match and int(match.group()) <= 1:
-                        print("Only 1 participant left. Ending recording.")
-                        break
-                except (TimeoutError, AttributeError):
-                    print("Could not find participant count or parse it. Ending recording.")
-                    break
-        except Exception as e:
-            job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
-            await page.screenshot(path=os.path.join(output_dir, "error.png"))
-        finally:
-            if recorder and recorder.poll() is None:
-                recorder.terminate()
-                recorder.communicate()
-            
-            try:
-                # Use a more generic selector for the leave button
-                await page.locator('[aria-label*="Leave"], [aria-label*="Hang up"]').first.click(timeout=5000)
-                await asyncio.sleep(3)
-            except Exception:
-                pass
-            
-            await browser.close()
-
-    if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 1024:
-        job_status[job_id] = {"status": "transcribing"}
-        transcription_success = transcribe_audio(output_audio_path, output_transcript_path)
-        
-        if transcription_success:
-            job_status[job_id] = {"status": "summarizing"}
-            summarizer = WorkflowAgentProcessor(base_url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
-            
-            file_id = await summarizer.upload_file(output_transcript_path)
-            if file_id:
-                summary_pdf_path = os.path.join(output_dir, "summary.pdf")
-                summary_success = await summarizer.run_workflow(file_id, summary_pdf_path)
-                if summary_success:
-                    job_status[job_id] = {"status": "completed", "transcript_path": output_transcript_path, "summary_path": summary_pdf_path}
-                else:
-                    job_status[job_id] = {"status": "failed", "error": "Summarization failed."}
-            else:
-                 job_status[job_id] = {"status": "failed", "error": "File upload for summarization failed."}
-        else:
-            job_status[job_id] = {"status": "failed", "error": "Transcription failed"}
-    else:
-        job_status[job_id] = {"status": "failed", "error": "Audio recording was empty or failed"}
+    return FileResponse(summary_path, media_type='application/pdf', filename='summary.pdf')
