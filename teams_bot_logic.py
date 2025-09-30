@@ -79,15 +79,25 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await name_input.wait_for(state="visible", timeout=30000)
             await name_input.fill("SHAI AI Notetaker")
             
+            # --- NEW ROBUST MIC/CAMERA LOGIC ---
             try:
-                await page.get_by_role("button", name="Microphone on", exact=True).click(timeout=5000)
-            except TimeoutError:
-                pass 
+                mic_button = page.get_by_role("button", name=re.compile("Microphone", re.IGNORECASE))
+                await mic_button.wait_for(state="visible", timeout=10000)
+                # Check if the button is pressed (aria-pressed="true" means ON)
+                if await mic_button.get_attribute("aria-pressed") == "true":
+                    await mic_button.click()
+                    print("✅ Microphone turned off.")
+            except Exception:
+                print("🎤 Microphone state could not be changed or was already off.")
 
             try:
-                await page.get_by_role("button", name="Camera on", exact=True).click(timeout=5000)
-            except TimeoutError:
-                pass
+                camera_button = page.get_by_role("button", name=re.compile("Camera", re.IGNORECASE))
+                await camera_button.wait_for(state="visible", timeout=10000)
+                if await camera_button.get_attribute("aria-pressed") == "true":
+                    await camera_button.click()
+                    print("✅ Camera turned off.")
+            except Exception:
+                print("📷 Camera state could not be changed or was already off.")
 
             join_button_locator = page.get_by_role("button", name="Join now")
             await join_button_locator.wait_for(timeout=15000)
@@ -108,7 +118,9 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         print("Stop signal received, leaving meeting.")
                         break
                     
-                    is_in_lobby = await page.locator('text*="waiting for others to join"').or_(page.locator('text*="Someone in the meeting should let you in soon"')).is_visible()
+                    # --- CORRECTED LOBBY DETECTION SELECTOR ---
+                    lobby_text_pattern = re.compile("waiting for others to join|Someone in the meeting should let you in soon|Ожидание присоединения других участников", re.IGNORECASE)
+                    is_in_lobby = await page.get_by_text(lobby_text_pattern).is_visible()
                     if is_in_lobby:
                         print("🕒 Bot is in the lobby, waiting...")
                         continue
@@ -116,12 +128,8 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     participant_button = page.get_by_role("button", name=re.compile("People|Participants|Участники", re.IGNORECASE))
                     await participant_button.click()
                     
-                    # --- NEW, MORE ROBUST SELECTOR ---
-                    # This looks for any element designated as a "listitem" inside the side panel.
-                    # This is much more reliable than looking for a specific list label.
                     participant_list_selector = 'div[role="complementary"] [role="listitem"]'
-                    
-                    await page.locator(participant_list_selector).first.wait_for(state="visible", timeout=15000) # Increased timeout
+                    await page.locator(participant_list_selector).first.wait_for(state="visible", timeout=15000)
                     
                     participant_count = await page.locator(participant_list_selector).count()
                     print(f"👥 Found {participant_count} participant(s).")
@@ -130,11 +138,10 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         print("Only 1 participant left. Ending recording.")
                         break
                     
-                    await participant_button.click() # Close the panel
+                    await participant_button.click() 
 
                 except (TimeoutError, AttributeError) as e:
                     print(f"❌ Could not find participant count: {e}. Ending recording.")
-                    # Take a screenshot right when the error happens for debugging
                     await page.screenshot(path=os.path.join(output_dir, "participant_error.png"))
                     break
         except Exception as e:
