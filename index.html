@@ -19,7 +19,7 @@
 <body>
 
     <h1>Meeting Transcription Bot</h1>
-    <p>Enter a Google Meet or Microsoft Teams URL to begin recording and transcription.</p>
+    <p>Enter a Google Meet URL to begin recording and transcription.</p>
 
     <input type="text" id="meetUrl" placeholder="https://meet.google.com/xxx-yyyy-zzz">
     <button id="startBtn" onclick="startJob()">Start Transcription</button>
@@ -65,16 +65,7 @@
                     body: JSON.stringify({ meeting_url: meetingUrl })
                 });
                 const data = await response.json();
-
-                if (!response.ok) {
-                    let errorMsg = "Failed to start job.";
-                    if (data.detail && Array.isArray(data.detail)) {
-                        errorMsg = data.detail[0].msg;
-                    } else if (data.detail) {
-                        errorMsg = data.detail;
-                    }
-                    throw new Error(errorMsg);
-                }
+                if (!response.ok) { throw new Error(data.detail || "Failed to start job."); }
 
                 currentJobId = data.job_id;
                 statusDiv.textContent = `Job started with ID: ${currentJobId}. Waiting for completion...`;
