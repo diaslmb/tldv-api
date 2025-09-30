@@ -1,20 +1,29 @@
 import uuid
 import os
-import bot_logic
+import bot_logic as google_bot_logic
+import teams_bot_logic
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Annotated
 from pydantic.functional_validators import AfterValidator
 from fastapi.middleware.cors import CORSMiddleware
 
-# Pydantic doesn't have a built-in HttpUrl type anymore, so we use a simple validator
+def get_platform(url: str) -> str:
+    if "meet.google.com" in url:
+        return "google"
+    elif "teams.live.com" in url:
+        return "teams"
+    else:
+        return "unsupported"
+
 def check_url(url: str) -> str:
-    if "meet.google.com" not in url:
-        raise ValueError("URL must be a valid Google Meet link")
+    platform = get_platform(url)
+    if platform == "unsupported":
+        raise ValueError("URL must be a valid Google Meet or Microsoft Teams link")
     return url
 
-GoogleMeetUrl = Annotated[str, AfterValidator(check_url)]
+Url = Annotated[str, AfterValidator(check_url)]
 
 app = FastAPI()
 
@@ -31,16 +40,22 @@ app.add_middleware(
 jobs = {}
 
 class MeetingRequest(BaseModel):
-    meeting_url: GoogleMeetUrl
+    meeting_url: Url
 
 @app.post("/start-meeting")
 async def start_meeting(request: MeetingRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "pending"}
-    background_tasks.add_task(bot_logic.run_bot_task, request.meeting_url, job_id, jobs)
-    return {"message": "Meeting bot started.", "job_id": job_id}
 
-# --- NEW ENDPOINT ADDED HERE ---
+    platform = get_platform(request.meeting_url)
+
+    if platform == "google":
+        background_tasks.add_task(google_bot_logic.run_bot_task, request.meeting_url, job_id, jobs)
+    elif platform == "teams":
+        background_tasks.add_task(teams_bot_logic.run_bot_task, request.meeting_url, job_id, jobs)
+    
+    return {"message": f"Meeting bot started for {platform}.", "job_id": job_id}
+
 @app.post("/stop-meeting/{job_id}")
 async def stop_meeting(job_id: str):
     """
@@ -50,13 +65,11 @@ async def stop_meeting(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # Only signal to stop if it's in an active state
     if job.get("status") in ["starting_browser", "navigating", "recording"]:
         jobs[job_id]["status"] = "stopping"
         return {"message": "Stop signal sent to bot."}
     
     return {"message": f"Bot is not in an active state to be stopped. Current status: {job.get('status')}"}
-# --------------------------------
 
 @app.get("/status/{job_id}")
 async def get_status(job_id: str):
