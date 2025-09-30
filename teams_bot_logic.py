@@ -96,7 +96,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             await join_button_locator.click(timeout=15000)
 
-            # Wait for the main meeting UI to confirm we are in
             await page.get_by_role("button", name=re.compile("Leave|Hang up", re.IGNORECASE)).wait_for(state="visible", timeout=45000)
             print("✅ Bot has successfully joined the meeting.")
             await asyncio.sleep(5) 
@@ -109,23 +108,20 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         print("Stop signal received, leaving meeting.")
                         break
                     
-                    # More robust check for lobby screen
-                    is_in_lobby = await page.locator('text="Someone in the meeting should let you in soon"').or_(page.locator('text="We\'ve let people in the meeting know you\'re waiting"')).or_(page.locator('text="Ожидание присоединения других участников"')).is_visible()
+                    is_in_lobby = await page.locator('text*="waiting for others to join"').or_(page.locator('text*="Someone in the meeting should let you in soon"')).is_visible()
                     if is_in_lobby:
                         print("🕒 Bot is in the lobby, waiting...")
                         continue
 
-                    # --- REVISED PARTICIPANT COUNT LOGIC ---
-                    print("🔍 Looking for participant button...")
                     participant_button = page.get_by_role("button", name=re.compile("People|Participants|Участники", re.IGNORECASE))
-                    await participant_button.wait_for(state="visible", timeout=10000)
                     await participant_button.click()
                     
-                    print("✅ Clicked participant button. Looking for participant list...")
-                    # This selector targets the specific list of participants in the side panel
-                    participant_list_selector = 'div[role="complementary"] ul[aria-label*="Participants"] li'
+                    # --- NEW, MORE ROBUST SELECTOR ---
+                    # This looks for any element designated as a "listitem" inside the side panel.
+                    # This is much more reliable than looking for a specific list label.
+                    participant_list_selector = 'div[role="complementary"] [role="listitem"]'
                     
-                    await page.locator(participant_list_selector).first.wait_for(state="visible", timeout=10000)
+                    await page.locator(participant_list_selector).first.wait_for(state="visible", timeout=15000) # Increased timeout
                     
                     participant_count = await page.locator(participant_list_selector).count()
                     print(f"👥 Found {participant_count} participant(s).")
@@ -138,6 +134,8 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
                 except (TimeoutError, AttributeError) as e:
                     print(f"❌ Could not find participant count: {e}. Ending recording.")
+                    # Take a screenshot right when the error happens for debugging
+                    await page.screenshot(path=os.path.join(output_dir, "participant_error.png"))
                     break
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
