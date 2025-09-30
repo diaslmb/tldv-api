@@ -4,19 +4,18 @@ import asyncio
 import subprocess
 from playwright.async_api import async_playwright, TimeoutError
 import requests
+import uuid
 from summarizer import WorkflowAgentProcessor
 
 # --- CONFIGURATION ---
 MAX_MEETING_DURATION_SECONDS = 10800
 WHISPERX_URL = "http://localhost:8000/v1/audio/transcriptions"
-BOT_NAME = "SHAI AI Notetaker"
 
 def get_ffmpeg_command(platform, duration, output_path):
     if platform.startswith("linux"):
         return ["ffmpeg", "-y", "-f", "pulse", "-i", "default", "-t", str(duration), output_path]
     return None
 
-# (transcribe_audio function remains the same)
 def transcribe_audio(audio_path, transcript_path):
     if not os.path.exists(audio_path):
         print(f"❌ Audio file not found at {audio_path}")
@@ -43,72 +42,6 @@ def transcribe_audio(audio_path, transcript_path):
         print(f"An unexpected error occurred during transcription: {e}")
         return False
 
-
-# --- PLATFORM SPECIFIC LOGIC ---
-
-async def join_google_meet(page):
-    await page.locator('input[placeholder="Your name"]').fill(BOT_NAME)
-    await page.get_by_role("button", name="Turn off microphone").click(timeout=10000)
-    await page.get_by_role("button", name="Turn off camera").click(timeout=10000)
-    await page.get_by_role("button", name=re.compile("Join now|Ask to join")).click(timeout=15000)
-
-async def monitor_google_meet(page, job_id, job_status):
-    while True:
-        await asyncio.sleep(4)
-        if job_status.get(job_id, {}).get("status") == "stopping":
-            print("Stop signal received, leaving Google Meet.")
-            break
-        
-        try:
-            locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"]').first
-            await locator.wait_for(state="visible", timeout=3000)
-            count_text = await locator.get_attribute("aria-label")
-            match = re.search(r'(\d+)', count_text)
-            if match and int(match.group(1)) <= 1:
-                print("Only 1 participant left in Google Meet. Ending.")
-                break
-        except (TimeoutError, AttributeError):
-            print("Could not find participant count in Google Meet. Ending.")
-            break
-
-async def join_microsoft_teams(page):
-    await page.wait_for_selector('input[placeholder="Type your name"]', timeout=30000)
-    # Ensure camera is off
-    if await page.locator('[data-tid="toggle-video"][aria-pressed="true"]').is_visible(timeout=5000):
-        await page.locator('[data-tid="toggle-video"]').click()
-    # Ensure microphone is off
-    if await page.locator('[data-tid="toggle-mic"][aria-pressed="true"]').is_visible(timeout=5000):
-        await page.locator('[data-tid="toggle-mic"]').click()
-        
-    await page.locator('input[placeholder="Type your name"]').fill(BOT_NAME)
-    await page.get_by_role("button", name="Join now").click(timeout=15000)
-    
-    print("In the lobby, waiting to be admitted...")
-    # Use a more reliable selector to confirm we are in the meeting
-    await page.wait_for_selector('#roster-button', timeout=300000)
-    print("Successfully admitted into the Teams meeting.")
-
-async def monitor_microsoft_teams(page, job_id, job_status):
-    while True:
-        await asyncio.sleep(4)
-        if job_status.get(job_id, {}).get("status") == "stopping":
-            print("Stop signal received, leaving Microsoft Teams.")
-            break
-            
-        try:
-            locator = page.locator('#roster-button').first
-            await locator.wait_for(state="visible", timeout=3000)
-            count_text = await locator.inner_text()
-            match = re.search(r'\((\d+)\)', count_text)
-            if match and int(match.group(1)) <= 1:
-                print("Only 1 participant left in Teams. Ending.")
-                break
-        except (TimeoutError, AttributeError):
-            print("Could not find participant count in Teams. Ending.")
-            break
-
-# --- MAIN BOT TASK ---
-
 async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
     import sys
     
@@ -123,70 +56,94 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         return
 
     job_status[job_id] = {"status": "starting_browser"}
-    platform = "teams" if "teams" in meeting_url else "meet"
-    
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"])
-        context = await browser.new_context(permissions=["microphone", "camera"])
-        page = await context.new_page()
+        try:
+            browser = await p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"])
+            context = await browser.new_context(permissions=["microphone", "camera"])
+            page = await context.new_page()
+        except Exception as e:
+            job_status[job_id] = {"status": "failed", "error": f"Failed to launch browser: {e}"}
+            return
+            
         recorder = None
-        
         try:
             job_status[job_id] = {"status": "navigating"}
             await page.goto(meeting_url, timeout=60000)
+            await page.locator('input[placeholder="Your name"]').fill("SHAI.PRO Notetaker")
+            
+            try:
+                await page.get_by_role("button", name="Turn off microphone").click(timeout=10000)
+                await page.get_by_role("button", name="Turn off camera").click(timeout=10000)
+            except Exception: pass
 
-            if platform == "meet":
-                await join_google_meet(page)
-            else: # teams
-                await join_microsoft_teams(page)
-
+            join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
+            await join_button_locator.wait_for(timeout=15000)
+            
             job_status[job_id] = {"status": "recording"}
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            await asyncio.sleep(5) # Give it a moment to settle
+            await join_button_locator.click(timeout=15000)
 
-            if platform == "meet":
-                await monitor_google_meet(page, job_id, job_status)
-            else: # teams
-                await monitor_microsoft_teams(page, job_id, job_status)
+            try:
+                await page.get_by_role("button", name="Got it").click(timeout=15000)
+            except TimeoutError: pass
+            
+            await asyncio.sleep(10)
 
+            while True:
+                # --- THIS IS THE LINE THAT WAS CHANGED ---
+                await asyncio.sleep(4) # Check every 4 seconds for better responsiveness
+                
+                try:
+                    if job_status.get(job_id, {}).get("status") == "stopping":
+                        print("Stop signal received, leaving meeting.")
+                        break
+
+                    locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
+                    await locator.wait_for(state="visible", timeout=3000) # Reduced timeout slightly
+                    count_text = await locator.get_attribute("aria-label")
+                    match = re.search(r'\d+', count_text)
+                    if match and int(match.group()) <= 1:
+                        print("Only 1 participant left. Ending recording.")
+                        break
+                except (TimeoutError, AttributeError):
+                    print("Could not find participant count or parse it. Ending recording.")
+                    break
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
             await page.screenshot(path=os.path.join(output_dir, "error.png"))
         finally:
-            print("Exiting meeting and cleaning up.")
             if recorder and recorder.poll() is None:
                 recorder.terminate()
                 recorder.communicate()
             
             try:
-                # Use platform-specific leave selectors
-                if platform == "meet":
-                    await page.get_by_role("button", name="Leave call").click(timeout=5000)
-                else: # teams
-                    await page.locator('#hangup-button').click(timeout=5000)
-            except Exception:
-                pass
+                await page.get_by_role("button", name="Leave call").click(timeout=5000)
+                await asyncio.sleep(3)
+            except Exception: pass
             
             await browser.close()
 
-    # (Transcription and Summarization logic remains the same)
     if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 1024:
         job_status[job_id] = {"status": "transcribing"}
-        if transcribe_audio(output_audio_path, output_transcript_path):
+        transcription_success = transcribe_audio(output_audio_path, output_transcript_path)
+        
+        if transcription_success:
+            # --- SUMMARIZATION STEP ---
             job_status[job_id] = {"status": "summarizing"}
             summarizer = WorkflowAgentProcessor(base_url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
+            
             file_id = await summarizer.upload_file(output_transcript_path)
             if file_id:
                 summary_pdf_path = os.path.join(output_dir, "summary.pdf")
-                if await summarizer.run_workflow(file_id, summary_pdf_path):
+                summary_success = await summarizer.run_workflow(file_id, summary_pdf_path)
+                if summary_success:
                     job_status[job_id] = {"status": "completed", "transcript_path": output_transcript_path, "summary_path": summary_pdf_path}
                 else:
                     job_status[job_id] = {"status": "failed", "error": "Summarization failed."}
             else:
                  job_status[job_id] = {"status": "failed", "error": "File upload for summarization failed."}
+            # --- END OF STEP ---
         else:
             job_status[job_id] = {"status": "failed", "error": "Transcription failed"}
     else:
-        job_error = job_status.get(job_id, {}).get("error")
-        if not job_error or "occurred in the meeting" not in job_error:
-            job_status[job_id] = {"status": "failed", "error": "Audio recording was empty or failed"}
+        job_status[job_id] = {"status": "failed", "error": "Audio recording was empty or failed"}
