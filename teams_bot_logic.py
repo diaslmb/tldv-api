@@ -70,19 +70,30 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             job_status[job_id] = {"status": "navigating"}
             await page.goto(meeting_url, timeout=60000)
             
-            # Interact with the "Continue on this browser" button if it appears
             try:
-                await page.locator('text=Continue on this browser').click(timeout=15000)
+                await page.get_by_role("button", name="Continue on this browser").click(timeout=15000)
             except TimeoutError:
-                pass # Button may not be present
+                pass 
                 
-            await page.locator('input[placeholder="Type your name"]').fill("SHAI AI Notetaker")
+            await page.get_by_placeholder("Type your name").fill("SHAI AI Notetaker", timeout=30000)
             
-            # Turn off microphone and camera
-            await page.locator('[data-tid="toggle-microphone"]').click()
-            await page.locator('[data-tid="toggle-video"]').click()
+            # --- SELECTOR CHANGE ---
+            # Using more robust ARIA labels to find the buttons.
+            # We wait for the camera button to be visible first.
+            camera_button = page.get_by_role("button", name=re.compile("Camera on|Camera off", re.IGNORECASE))
+            await camera_button.wait_for(state="visible", timeout=30000)
             
-            join_button_locator = page.locator('button:has-text("Join now")')
+            mic_button = page.get_by_role("button", name=re.compile("Microphone on|Microphone off", re.IGNORECASE))
+            
+            # Check if mic is on and turn it off
+            if "on" in await mic_button.get_attribute("aria-label", timeout=5000):
+                 await mic_button.click()
+
+            # Check if camera is on and turn it off
+            if "on" in await camera_button.get_attribute("aria-label", timeout=5000):
+                 await camera_button.click()
+
+            join_button_locator = page.get_by_role("button", name="Join now")
             await join_button_locator.wait_for(timeout=15000)
             
             job_status[job_id] = {"status": "recording"}
@@ -99,18 +110,18 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         print("Stop signal received, leaving meeting.")
                         break
 
-                    # Logic to check participant count in Teams
-                    # This selector might need adjustment based on the Teams UI
-                    participant_button = page.locator('[data-tid="participant-button"]')
+                    # --- SELECTOR CHANGE ---
+                    participant_button = page.get_by_role("button", name=re.compile("People|Participants", re.IGNORECASE))
                     await participant_button.click()
-                    await page.wait_for_selector('[data-tid="participant-list"]')
-                    participant_count = await page.locator('[data-tid="participant-list"] [role="listitem"]').count()
                     
+                    participant_list = page.locator('[role="listitem"]')
+                    await participant_list.first.wait_for(timeout=5000)
+                    participant_count = await participant_list.count()
+
                     if participant_count <= 1:
                         print("Only 1 participant left. Ending recording.")
                         break
                     
-                    # Close the participant list to not obstruct other elements
                     await participant_button.click()
 
                 except (TimeoutError, AttributeError):
@@ -125,8 +136,8 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 recorder.communicate()
             
             try:
-                # Selector for the leave button in Teams
-                await page.locator('[data-tid="hangup-button"]').click(timeout=5000)
+                # --- SELECTOR CHANGE ---
+                await page.get_by_role("button", name=re.compile("Leave|Hang up", re.IGNORECASE)).click(timeout=5000)
                 await asyncio.sleep(3)
             except Exception: pass
             
