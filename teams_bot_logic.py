@@ -79,24 +79,15 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await name_input.wait_for(state="visible", timeout=30000)
             await name_input.fill("SHAI AI Notetaker")
             
-            # --- LOGIC CHANGE FOR STABILITY ---
-            # This new logic is more robust. It tries to find the button in the "on" state
-            # and clicks it. If it fails (because the button is already off), it ignores
-            # the error and proceeds.
             try:
-                # The label for a button that is currently ON is "Microphone on". We click it to turn it OFF.
                 await page.get_by_role("button", name="Microphone on", exact=True).click(timeout=5000)
-                print("✅ Microphone turned off.")
             except TimeoutError:
-                print("🎤 Microphone was already off.")
+                pass 
 
             try:
-                # The label for a button that is currently ON is "Camera on". We click it to turn it OFF.
                 await page.get_by_role("button", name="Camera on", exact=True).click(timeout=5000)
-                print("✅ Camera turned off.")
             except TimeoutError:
-                print("📷 Camera was already off.")
-            # --- END OF LOGIC CHANGE ---
+                pass
 
             join_button_locator = page.get_by_role("button", name="Join now")
             await join_button_locator.wait_for(timeout=15000)
@@ -105,31 +96,48 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             await join_button_locator.click(timeout=15000)
 
-            await asyncio.sleep(10)
+            # Wait for the main meeting UI to confirm we are in
+            await page.get_by_role("button", name=re.compile("Leave|Hang up", re.IGNORECASE)).wait_for(state="visible", timeout=45000)
+            print("✅ Bot has successfully joined the meeting.")
+            await asyncio.sleep(5) 
 
             while True:
-                await asyncio.sleep(4) 
+                await asyncio.sleep(5) 
                 
                 try:
                     if job_status.get(job_id, {}).get("status") == "stopping":
                         print("Stop signal received, leaving meeting.")
                         break
+                    
+                    # More robust check for lobby screen
+                    is_in_lobby = await page.locator('text="Someone in the meeting should let you in soon"').or_(page.locator('text="We\'ve let people in the meeting know you\'re waiting"')).or_(page.locator('text="Ожидание присоединения других участников"')).is_visible()
+                    if is_in_lobby:
+                        print("🕒 Bot is in the lobby, waiting...")
+                        continue
 
-                    participant_button = page.get_by_role("button", name=re.compile("People|Participants", re.IGNORECASE))
+                    # --- REVISED PARTICIPANT COUNT LOGIC ---
+                    print("🔍 Looking for participant button...")
+                    participant_button = page.get_by_role("button", name=re.compile("People|Participants|Участники", re.IGNORECASE))
+                    await participant_button.wait_for(state="visible", timeout=10000)
                     await participant_button.click()
                     
-                    participant_list = page.locator('[role="listitem"]')
-                    await participant_list.first.wait_for(timeout=5000)
-                    participant_count = await participant_list.count()
+                    print("✅ Clicked participant button. Looking for participant list...")
+                    # This selector targets the specific list of participants in the side panel
+                    participant_list_selector = 'div[role="complementary"] ul[aria-label*="Participants"] li'
+                    
+                    await page.locator(participant_list_selector).first.wait_for(state="visible", timeout=10000)
+                    
+                    participant_count = await page.locator(participant_list_selector).count()
+                    print(f"👥 Found {participant_count} participant(s).")
 
                     if participant_count <= 1:
                         print("Only 1 participant left. Ending recording.")
                         break
                     
-                    await participant_button.click()
+                    await participant_button.click() # Close the panel
 
-                except (TimeoutError, AttributeError):
-                    print("Could not find participant count or parse it. Ending recording.")
+                except (TimeoutError, AttributeError) as e:
+                    print(f"❌ Could not find participant count: {e}. Ending recording.")
                     break
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
