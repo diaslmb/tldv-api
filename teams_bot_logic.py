@@ -74,24 +74,29 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 await page.get_by_role("button", name="Continue on this browser").click(timeout=15000)
             except TimeoutError:
                 pass 
-                
-            await page.get_by_placeholder("Type your name").fill("SHAI AI Notetaker", timeout=30000)
             
-            # --- SELECTOR CHANGE ---
-            # Using more robust ARIA labels to find the buttons.
-            # We wait for the camera button to be visible first.
-            camera_button = page.get_by_role("button", name=re.compile("Camera on|Camera off", re.IGNORECASE))
-            await camera_button.wait_for(state="visible", timeout=30000)
+            name_input = page.get_by_placeholder("Type your name")
+            await name_input.wait_for(state="visible", timeout=30000)
+            await name_input.fill("SHAI AI Notetaker")
             
-            mic_button = page.get_by_role("button", name=re.compile("Microphone on|Microphone off", re.IGNORECASE))
-            
-            # Check if mic is on and turn it off
-            if "on" in await mic_button.get_attribute("aria-label", timeout=5000):
-                 await mic_button.click()
+            # --- LOGIC CHANGE FOR STABILITY ---
+            # This new logic is more robust. It tries to find the button in the "on" state
+            # and clicks it. If it fails (because the button is already off), it ignores
+            # the error and proceeds.
+            try:
+                # The label for a button that is currently ON is "Microphone on". We click it to turn it OFF.
+                await page.get_by_role("button", name="Microphone on", exact=True).click(timeout=5000)
+                print("✅ Microphone turned off.")
+            except TimeoutError:
+                print("🎤 Microphone was already off.")
 
-            # Check if camera is on and turn it off
-            if "on" in await camera_button.get_attribute("aria-label", timeout=5000):
-                 await camera_button.click()
+            try:
+                # The label for a button that is currently ON is "Camera on". We click it to turn it OFF.
+                await page.get_by_role("button", name="Camera on", exact=True).click(timeout=5000)
+                print("✅ Camera turned off.")
+            except TimeoutError:
+                print("📷 Camera was already off.")
+            # --- END OF LOGIC CHANGE ---
 
             join_button_locator = page.get_by_role("button", name="Join now")
             await join_button_locator.wait_for(timeout=15000)
@@ -110,7 +115,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         print("Stop signal received, leaving meeting.")
                         break
 
-                    # --- SELECTOR CHANGE ---
                     participant_button = page.get_by_role("button", name=re.compile("People|Participants", re.IGNORECASE))
                     await participant_button.click()
                     
@@ -136,7 +140,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 recorder.communicate()
             
             try:
-                # --- SELECTOR CHANGE ---
                 await page.get_by_role("button", name=re.compile("Leave|Hang up", re.IGNORECASE)).click(timeout=5000)
                 await asyncio.sleep(3)
             except Exception: pass
