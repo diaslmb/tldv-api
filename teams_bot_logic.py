@@ -84,45 +84,20 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await page.screenshot(path=os.path.join(output_dir, "1_pre_join_screen.png"))
             print("📸 Screenshot saved: 1_pre_join_screen.png")
 
-            # --- MICROPHONE TURN OFF - TARGETED APPROACH ---
+            # --- MICROPHONE TURN OFF ---
             try:
-                print("🎤 Attempting to turn off microphone...")
-                await asyncio.sleep(1.5)
+                print("🎤 Turning off microphone...")
+                await asyncio.sleep(1)
                 
-                # In the Teams pre-join screen, there are toggle switches
-                # The microphone toggle is the left one (first one)
-                # Look for the actual clickable toggle element
-                
-                # Strategy 1: Find the toggle by its position (first toggle in the UI)
-                try:
-                    # Click at the coordinates where the microphone toggle usually is
-                    # This is more reliable than trying to find the exact element
-                    toggle_area = page.locator('[data-tid="toggle-button"], .ui-toggle, .ms-Toggle').first
-                    await toggle_area.click(timeout=5000)
-                    print("✅ Clicked microphone toggle via toggle element")
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    print(f"Toggle element click failed: {e}")
-                    
-                    # Strategy 2: Click the icon itself (microphone icon)
-                    try:
-                        # The SVG microphone icon
-                        mic_icon_parent = page.locator('[role="img"]').first
-                        await mic_icon_parent.click(timeout=5000)
-                        print("✅ Clicked microphone icon")
-                        await asyncio.sleep(1)
-                    except Exception as e2:
-                        print(f"Icon click failed: {e2}")
-                        
-                        # Strategy 3: Keyboard shortcut as last resort
-                        await page.keyboard.press('Control+Shift+M')
-                        print("✅ Used Ctrl+Shift+M shortcut")
-                        await asyncio.sleep(1)
+                # Use keyboard shortcut - most reliable method for Teams
+                await page.keyboard.press('Control+Shift+M')
+                print("✅ Microphone muted via Ctrl+Shift+M")
+                await asyncio.sleep(1)
                 
                 await page.screenshot(path=os.path.join(output_dir, "1b_after_mic_toggle.png"))
                 
             except Exception as e:
-                print(f"⚠️ Microphone toggle error: {e}")
+                print(f"⚠️ Could not mute microphone: {e}")
 
             join_button_locator = page.get_by_role("button", name="Join now")
             await join_button_locator.wait_for(timeout=15000)
