@@ -80,53 +80,44 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await name_input.wait_for(state="visible", timeout=30000)
             await name_input.fill("SHAI AI Notetaker")
 
+            await asyncio.sleep(2)
             await page.screenshot(path=os.path.join(output_dir, "1_pre_join_screen.png"))
             print("📸 Screenshot saved: 1_pre_join_screen.png")
 
-            # --- IMPROVED MICROPHONE TURN OFF LOGIC ---
+            # --- FIXED MICROPHONE TURN OFF ---
+            # In Teams pre-join screen, the microphone control is a toggle button
+            # that's near the bottom of the pre-join card
             try:
-                # Try multiple strategies to turn off the microphone
+                print("🎤 Attempting to turn off microphone...")
                 
-                # Strategy 1: Look for microphone toggle button by aria-label
+                # Wait a moment for controls to be fully rendered
+                await asyncio.sleep(1)
+                
+                # Method 1: Click the microphone icon directly
+                # The microphone button is usually the first icon button in the controls area
                 try:
-                    mic_button = page.locator('button[aria-label*="microphone" i], button[aria-label*="Mute" i], button[aria-label*="Микрофон" i]').first
-                    await mic_button.wait_for(state="visible", timeout=5000)
-                    
-                    # Check if it's currently unmuted (aria-pressed="false" or aria-checked="false")
-                    aria_pressed = await mic_button.get_attribute("aria-pressed")
-                    aria_checked = await mic_button.get_attribute("aria-checked")
-                    
-                    if aria_pressed == "false" or aria_checked == "false":
-                        print("🎤 Microphone is ON, clicking to turn it OFF.")
+                    # Look for button with microphone icon (svg path contains specific mic shape)
+                    mic_button = page.locator('button').filter(has=page.locator('svg')).first
+                    if await mic_button.is_visible():
                         await mic_button.click()
-                        await asyncio.sleep(1)
-                        print("✅ Microphone turned OFF via button.")
-                    else:
-                        print("🎤 Microphone is already OFF (via button check).")
-                    continue_to_join = True
+                        print("✅ Clicked microphone button (Method 1)")
+                        await asyncio.sleep(0.5)
                 except Exception as e:
-                    print(f"Strategy 1 failed: {e}")
-                    continue_to_join = False
-                
-                # Strategy 2: Look for toggle switches
-                if not continue_to_join:
+                    print(f"Method 1 failed: {e}")
+                    
+                    # Method 2: Try using keyboard shortcut
                     try:
-                        mic_switch = page.locator('div[role="switch"]').first
-                        await mic_switch.wait_for(state="visible", timeout=5000)
-                        
-                        is_mic_on = await mic_switch.get_attribute("aria-checked")
-                        if is_mic_on == "true":
-                            print("🎤 Microphone is ON (switch), attempting to turn it OFF.")
-                            await mic_switch.click()
-                            await asyncio.sleep(1)
-                            print("✅ Microphone turned OFF via switch.")
-                        else:
-                            print("🎤 Microphone is already OFF (via switch check).")
-                    except Exception as e:
-                        print(f"Strategy 2 failed: {e}")
-                        
+                        await page.keyboard.press('Control+Shift+M')  # Teams shortcut for mute
+                        print("✅ Used keyboard shortcut Ctrl+Shift+M (Method 2)")
+                        await asyncio.sleep(0.5)
+                    except Exception as e2:
+                        print(f"Method 2 failed: {e2}")
+                
+                # Take screenshot to verify mic state
+                await page.screenshot(path=os.path.join(output_dir, "1b_after_mic_toggle.png"))
+                
             except Exception as e:
-                print(f"⚠️ Could not change microphone state: {e}")
+                print(f"⚠️ Could not toggle microphone: {e}")
 
             join_button_locator = page.get_by_role("button", name="Join now")
             await join_button_locator.wait_for(timeout=15000)
@@ -137,7 +128,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
             await page.get_by_role("button", name=re.compile("Leave|Hang up|Выйти", re.IGNORECASE)).wait_for(state="visible", timeout=45000)
             print("✅ Bot has successfully joined the meeting.")
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)  # Give more time for meeting UI to fully load
 
             while True:
                 await asyncio.sleep(5)
@@ -153,62 +144,74 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         print("🕒 Bot is in the lobby, waiting...")
                         continue
 
-                    # --- IMPROVED PARTICIPANT COUNT LOGIC ---
-                    # First, open the participants panel
-                    participant_button = page.get_by_role("button", name=re.compile("People|Participants|Участники", re.IGNORECASE))
-                    await participant_button.click()
-                    await asyncio.sleep(2)  # Wait for panel to fully load
+                    # --- IMPROVED PARTICIPANT COUNTING ---
+                    participant_count = 2  # Safe default
                     
-                    await page.screenshot(path=os.path.join(output_dir, "2_after_participants_click.png"))
-
-                    # Strategy 1: Count using the panel and listitems
                     try:
-                        participants_panel = page.get_by_role("complementary", name=re.compile("Participants|People|Участники", re.IGNORECASE))
-                        await participants_panel.wait_for(state="visible", timeout=10000)
+                        # Find and click the People/Participants button
+                        participant_button = page.get_by_role("button", name=re.compile("People|Participants|Участники", re.IGNORECASE)).first
                         
-                        # Count all listitems in the participants panel
-                        participant_items = participants_panel.get_by_role("listitem")
-                        participant_count = await participant_items.count()
-                        
-                        print(f"👥 Found {participant_count} participant(s) in panel.")
-                        
+                        if await participant_button.is_visible(timeout=3000):
+                            # Open the participants panel
+                            await participant_button.click()
+                            await asyncio.sleep(2.5)  # Wait longer for panel animation
+                            
+                            await page.screenshot(path=os.path.join(output_dir, f"participants_panel_{asyncio.get_event_loop().time()}.png"))
+                            
+                            # Look for "In this meeting (X)" text
+                            try:
+                                # Get all text from the page
+                                page_text = await page.inner_text('body')
+                                
+                                # Look for the pattern "In this meeting (number)"
+                                patterns = [
+                                    r'In this meeting[^\d]*\((\d+)\)',
+                                    r'В этой встрече[^\d]*\((\d+)\)',
+                                    r'Participants[^\d]*\((\d+)\)',
+                                    r'Участники[^\d]*\((\d+)\)'
+                                ]
+                                
+                                for pattern in patterns:
+                                    match = re.search(pattern, page_text, re.IGNORECASE)
+                                    if match:
+                                        participant_count = int(match.group(1))
+                                        print(f"👥 Found participant count in text: {participant_count}")
+                                        break
+                                
+                                if participant_count == 2:  # If still default, try alternative method
+                                    # Look for the complementary panel and count visible participant names
+                                    panel = page.locator('[role="complementary"]').first
+                                    if await panel.is_visible():
+                                        # Count elements that look like participant entries
+                                        # Usually they have specific structure with name and status
+                                        participant_elements = await panel.locator('[role="listitem"]').all()
+                                        alt_count = len(participant_elements)
+                                        if alt_count > 0:
+                                            participant_count = alt_count
+                                            print(f"👥 Counted {participant_count} participant listitems")
+                            
+                            except Exception as e:
+                                print(f"⚠️ Could not parse participant count from panel: {e}")
+                            
+                            # Close the participants panel
+                            await participant_button.click()
+                            await asyncio.sleep(1)
+                        else:
+                            print("⚠️ Participants button not visible")
+                            
                     except Exception as e:
-                        print(f"⚠️ Panel count failed: {e}, trying alternative method...")
-                        
-                        # Strategy 2: Try to get count from button text/aria-label
-                        try:
-                            button_label = await participant_button.get_attribute("aria-label")
-                            if button_label:
-                                match = re.search(r'(\d+)', button_label)
-                                if match:
-                                    participant_count = int(match.group(1))
-                                    print(f"👥 Found {participant_count} participant(s) from button label.")
-                                else:
-                                    participant_count = 1  # Assume at least bot is there
-                                    print("⚠️ Could not parse count, assuming 1 participant.")
-                            else:
-                                participant_count = 1
-                                print("⚠️ No button label, assuming 1 participant.")
-                        except Exception as e2:
-                            print(f"⚠️ Button label parsing failed: {e2}")
-                            participant_count = 1  # Default to 1 to prevent premature exit
-                    
-                    # Close the participant panel
-                    await participant_button.click()
-                    await asyncio.sleep(1)
+                        print(f"⚠️ Error accessing participants: {e}")
 
-                    # Exit condition: Leave only if 1 or fewer participants (only bot remains)
+                    # EXIT LOGIC: Leave only when 1 or fewer participants
                     if participant_count <= 1:
-                        print("⚠️ Only 1 participant (bot) left in meeting. Ending recording.")
+                        print(f"🚪 Only {participant_count} participant(s) remaining. Leaving meeting.")
                         break
                     else:
-                        print(f"✅ {participant_count} participants still in meeting. Continuing...")
+                        print(f"✅ {participant_count} participants still present. Monitoring...")
 
-                except (TimeoutError, AttributeError) as e:
-                    print(f"❌ Error checking participant count: {e}. Continuing for now...")
-                    await page.screenshot(path=os.path.join(output_dir, "participant_error.png"))
-                    # Don't break on error - continue monitoring
-                    continue
+                except Exception as e:
+                    print(f"❌ Error in monitoring loop: {e}")
+                    await page.screenshot(path=os.path.join(output_dir, "monitoring_error.png"))
 
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
@@ -243,7 +246,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 else:
                     job_status[job_id] = {"status": "failed", "error": "Summarization failed."}
             else:
-                job_status[job_id] = {"status": "failed", "error": "File upload for summarization failed."}
+                 job_status[job_id] = {"status": "failed", "error": "File upload for summarization failed."}
         else:
             job_status[job_id] = {"status": "failed", "error": "Transcription failed"}
     else:
