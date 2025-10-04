@@ -9,7 +9,6 @@ from summarizer import WorkflowAgentProcessor
 
 # --- CONFIGURATION ---
 MAX_MEETING_DURATION_SECONDS = 10800
-# --- THIS IS THE LINE THAT WAS CHANGED ---
 WHISPERX_URL = "http://88.204.158.4:8080/v1/audio/transcriptions"
 
 def get_ffmpeg_command(platform, duration, output_path):
@@ -25,7 +24,6 @@ def transcribe_audio(audio_path, transcript_path):
     try:
         with open(audio_path, 'rb') as f:
             files = {'file': (os.path.basename(audio_path), f)}
-            # --- THIS IS THE LINE THAT WAS CHANGED ---
             data = {'model': 'whisper-large-v3'}
             response = requests.post(WHISPERX_URL, files=files, data=data)
         if response.status_code == 200:
@@ -47,12 +45,12 @@ def transcribe_audio(audio_path, transcript_path):
 
 async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
     import sys
-    
+
     output_dir = os.path.join("outputs", job_id)
     os.makedirs(output_dir, exist_ok=True)
     output_audio_path = os.path.join(output_dir, "meeting_audio.wav")
     output_transcript_path = os.path.join(output_dir, "transcript.txt")
-    
+
     ffmpeg_command = get_ffmpeg_command(sys.platform, MAX_MEETING_DURATION_SECONDS, output_audio_path)
     if not ffmpeg_command:
         job_status[job_id] = {"status": "failed", "error": "Unsupported OS"}
@@ -67,21 +65,21 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"Failed to launch browser: {e}"}
             return
-            
+
         recorder = None
         try:
             job_status[job_id] = {"status": "navigating"}
             await page.goto(meeting_url, timeout=60000)
-            
+
             try:
                 await page.get_by_role("button", name="Continue on this browser").click(timeout=15000)
             except TimeoutError:
-                pass 
-            
+                pass
+
             name_input = page.get_by_placeholder("Type your name")
             await name_input.wait_for(state="visible", timeout=30000)
             await name_input.fill("SHAI AI Notetaker")
-            
+
             # --- NEW ROBUST MIC/CAMERA LOGIC ---
             try:
                 mic_button = page.locator('[data-tid="toggle-mute"]')
@@ -104,23 +102,24 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
             join_button_locator = page.get_by_role("button", name="Join now")
             await join_button_locator.wait_for(timeout=15000)
-            
+
             job_status[job_id] = {"status": "recording"}
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             await join_button_locator.click(timeout=15000)
 
             await page.get_by_role("button", name=re.compile("Leave|Hang up", re.IGNORECASE)).wait_for(state="visible", timeout=45000)
             print("✅ Bot has successfully joined the meeting.")
-            await asyncio.sleep(5) 
+            await asyncio.sleep(5)
 
             while True:
-                await asyncio.sleep(5) 
-                
+                await asyncio.sleep(5)
+
                 try:
                     if job_status.get(job_id, {}).get("status") == "stopping":
                         print("Stop signal received, leaving meeting.")
                         break
-                    
+
+                    # --- CORRECTED LOBBY DETECTION SELECTOR ---
                     lobby_text_pattern = re.compile("waiting for others to join|Someone in the meeting should let you in soon|Ожидание присоединения других участников", re.IGNORECASE)
                     is_in_lobby = await page.get_by_text(lobby_text_pattern).is_visible()
                     if is_in_lobby:
@@ -129,18 +128,20 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
                     participant_button = page.get_by_role("button", name=re.compile("People|Participants|Участники", re.IGNORECASE))
                     await participant_button.click()
-                    
-                    participant_list_selector = 'div[role="complementary"] [role="listitem"]'
+                    await asyncio.sleep(2) # Added delay for participant list to load
+
+                    # --- THIS IS THE LINE THAT WAS CHANGED ---
+                    participant_list_selector = '[data-tid="participant-item"]'
                     await page.locator(participant_list_selector).first.wait_for(state="visible", timeout=15000)
-                    
+
                     participant_count = await page.locator(participant_list_selector).count()
                     print(f"👥 Found {participant_count} participant(s).")
 
                     if participant_count <= 1:
                         print("Only 1 participant left. Ending recording.")
                         break
-                    
-                    await participant_button.click() 
+
+                    await participant_button.click() # Close the participant list
 
                 except (TimeoutError, AttributeError) as e:
                     print(f"❌ Could not find participant count: {e}. Ending recording.")
@@ -153,22 +154,22 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             if recorder and recorder.poll() is None:
                 recorder.terminate()
                 recorder.communicate()
-            
+
             try:
                 await page.get_by_role("button", name=re.compile("Leave|Hang up", re.IGNORECASE)).click(timeout=5000)
                 await asyncio.sleep(3)
             except Exception: pass
-            
+
             await browser.close()
 
     if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 1024:
         job_status[job_id] = {"status": "transcribing"}
         transcription_success = transcribe_audio(output_audio_path, output_transcript_path)
-        
+
         if transcription_success:
             job_status[job_id] = {"status": "summarizing"}
             summarizer = WorkflowAgentProcessor(base_url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
-            
+
             file_id = await summarizer.upload_file(output_transcript_path)
             if file_id:
                 summary_pdf_path = os.path.join(output_dir, "summary.pdf")
