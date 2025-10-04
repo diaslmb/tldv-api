@@ -143,85 +143,80 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         print("Stop signal received, leaving meeting.")
                         break
 
-                    # Check if in lobby
-                    lobby_text_pattern = re.compile("waiting for others to join|Someone in the meeting should let you in soon|Ожидание присоединения других участников", re.IGNORECASE)
-                    is_in_lobby = await page.get_by_text(lobby_text_pattern).is_visible()
-                    
-                    if is_in_lobby:
-                        print("🕒 Bot is in the lobby, waiting...")
-                        continue
-
-                    # --- PARTICIPANT COUNT WITH LOBBY CHECK ---
+                    # --- CHECK PARTICIPANT COUNT FIRST ---
                     participant_count = 2  # Safe default
                     
-                    # First, check if we were kicked to lobby (meeting ended by host)
-                    lobby_kicked_patterns = [
-                        "The meeting has ended",
-                        "You're the only one here",
-                        "Everyone else left",
-                        "Встреча завершена",
-                        "Вы остались один"
-                    ]
-                    
-                    page_text_for_lobby = await page.inner_text('body')
-                    for pattern in lobby_kicked_patterns:
-                        if pattern.lower() in page_text_for_lobby.lower():
-                            print(f"🚪 Meeting ended: '{pattern}' detected. Leaving.")
-                            break
-                    else:
-                        # Not kicked to lobby, proceed with normal participant count
-                        try:
-                            participant_button = page.get_by_role("button", name=re.compile("People|Participants|Участники", re.IGNORECASE)).first
+                    try:
+                        # Find the People/Participants button
+                        participant_button = page.get_by_role("button", name=re.compile("People|Participants|Участники", re.IGNORECASE)).first
+                        
+                        if await participant_button.is_visible(timeout=3000):
+                            # Open the participants panel
+                            await participant_button.click()
+                            await asyncio.sleep(2.5)
                             
-                            if await participant_button.is_visible(timeout=3000):
-                                await participant_button.click()
-                                await asyncio.sleep(2.5)
+                            await page.screenshot(path=os.path.join(output_dir, f"participants_{int(asyncio.get_event_loop().time())}.png"))
+                            
+                            try:
+                                # Get all text from the page
+                                page_text = await page.inner_text('body')
                                 
-                                await page.screenshot(path=os.path.join(output_dir, f"participants_panel_{asyncio.get_event_loop().time()}.png"))
+                                # Look for the pattern "In this meeting (number)"
+                                patterns = [
+                                    r'In this meeting[^\d]*\((\d+)\)',
+                                    r'В этой встрече[^\d]*\((\d+)\)',
+                                    r'Participants[^\d]*\((\d+)\)',
+                                    r'Участники[^\d]*\((\d+)\)'
+                                ]
                                 
-                                try:
-                                    page_text = await page.inner_text('body')
-                                    
-                                    patterns = [
-                                        r'In this meeting[^\d]*\((\d+)\)',
-                                        r'В этой встрече[^\d]*\((\d+)\)',
-                                        r'Participants[^\d]*\((\d+)\)',
-                                        r'Участники[^\d]*\((\d+)\)'
-                                    ]
-                                    
-                                    for pattern in patterns:
-                                        match = re.search(pattern, page_text, re.IGNORECASE)
-                                        if match:
-                                            participant_count = int(match.group(1))
-                                            print(f"👥 Found participant count in text: {participant_count}")
-                                            break
-                                    
-                                    if participant_count == 2:
-                                        panel = page.locator('[role="complementary"]').first
-                                        if await panel.is_visible():
-                                            participant_elements = await panel.locator('[role="listitem"]').all()
-                                            alt_count = len(participant_elements)
-                                            if alt_count > 0:
-                                                participant_count = alt_count
-                                                print(f"👥 Counted {participant_count} participant listitems")
+                                for pattern in patterns:
+                                    match = re.search(pattern, page_text, re.IGNORECASE)
+                                    if match:
+                                        participant_count = int(match.group(1))
+                                        print(f"👥 Found {participant_count} participant(s) in meeting")
+                                        break
                                 
-                                except Exception as e:
-                                    print(f"⚠️ Could not parse participant count from panel: {e}")
-                                
-                                await participant_button.click()
-                                await asyncio.sleep(1)
-                            else:
-                                print("⚠️ Participants button not visible")
-                                
-                        except Exception as e:
-                            print(f"⚠️ Error accessing participants: {e}")
-
-                        # EXIT LOGIC: Leave only when 1 or fewer participants
-                        if participant_count <= 1:
-                            print(f"🚪 Only {participant_count} participant(s) remaining. Leaving meeting.")
-                            break
+                                # If still default, try counting listitems
+                                if participant_count == 2:
+                                    panel = page.locator('[role="complementary"]').first
+                                    if await panel.is_visible():
+                                        participant_elements = await panel.locator('[role="listitem"]').all()
+                                        alt_count = len(participant_elements)
+                                        if alt_count > 0:
+                                            participant_count = alt_count
+                                            print(f"👥 Counted {participant_count} participant listitems")
+                            
+                            except Exception as e:
+                                print(f"⚠️ Could not parse participant count: {e}")
+                            
+                            # Close the participants panel
+                            await participant_button.click()
+                            await asyncio.sleep(1)
                         else:
-                            print(f"✅ {participant_count} participants still present. Monitoring...")
+                            print("⚠️ Participants button not visible, checking for meeting end...")
+                            # If we can't see the participants button, meeting might have ended
+                            participant_count = 0
+                            
+                    except Exception as e:
+                        print(f"⚠️ Error accessing participants: {e}")
+                        # Assume meeting might have ended if we can't access participants
+                        participant_count = 0
+
+                    # CRITICAL EXIT LOGIC: Leave if only 1 or 0 participants
+                    if participant_count <= 1:
+                        print(f"🚪 Only {participant_count} participant(s) left. Bot is alone or meeting ended. Leaving now.")
+                        break
+                    
+                    # If we have 2+ participants, check if we're actually in a lobby (not the meeting)
+                    if participant_count >= 2:
+                        lobby_text_pattern = re.compile("waiting for others to join|Someone in the meeting should let you in soon|Ожидание присоединения других участников", re.IGNORECASE)
+                        is_in_lobby = await page.get_by_text(lobby_text_pattern).is_visible()
+                        
+                        if is_in_lobby:
+                            print("🕒 Bot is in the lobby (not yet admitted to meeting), waiting...")
+                            continue
+                        else:
+                            print(f"✅ {participant_count} participants present. Monitoring...")
 
                 except Exception as e:
                     print(f"❌ Error in monitoring loop: {e}")
