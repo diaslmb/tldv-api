@@ -80,7 +80,10 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await name_input.wait_for(state="visible", timeout=30000)
             await name_input.fill("SHAI AI Notetaker")
 
-            # --- NEW ROBUST MIC/CAMERA LOGIC ---
+            # --- SCREENSHOT DEBUGGING 1 ---
+            await page.screenshot(path=os.path.join(output_dir, "1_pre_join_screen.png"))
+            print("📸 Screenshot saved: 1_pre_join_screen.png")
+
             try:
                 mic_button = page.locator('[data-tid="toggle-mute"]')
                 await mic_button.wait_for(state="visible", timeout=10000)
@@ -90,15 +93,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     print("✅ Microphone turned off.")
             except Exception:
                 print("🎤 Microphone state could not be changed or was already off.")
-
-            try:
-                camera_button = page.get_by_role("button", name=re.compile("Camera", re.IGNORECASE))
-                await camera_button.wait_for(state="visible", timeout=10000)
-                if await camera_button.get_attribute("aria-pressed") == "true":
-                    await camera_button.click()
-                    print("✅ Camera turned off.")
-            except Exception:
-                print("📷 Camera state could not be changed or was already off.")
 
             join_button_locator = page.get_by_role("button", name="Join now")
             await join_button_locator.wait_for(timeout=15000)
@@ -118,8 +112,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     if job_status.get(job_id, {}).get("status") == "stopping":
                         print("Stop signal received, leaving meeting.")
                         break
-
-                    # --- CORRECTED LOBBY DETECTION SELECTOR ---
+                    
                     lobby_text_pattern = re.compile("waiting for others to join|Someone in the meeting should let you in soon|Ожидание присоединения других участников", re.IGNORECASE)
                     is_in_lobby = await page.get_by_text(lobby_text_pattern).is_visible()
                     if is_in_lobby:
@@ -128,9 +121,12 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
                     participant_button = page.get_by_role("button", name=re.compile("People|Participants|Участники", re.IGNORECASE))
                     await participant_button.click()
-                    await asyncio.sleep(2) # Added delay for participant list to load
 
-                    # --- THIS IS THE LINE THAT WAS CHANGED ---
+                    # --- SCREENSHOT DEBUGGING 2 ---
+                    await asyncio.sleep(2) # Wait for panel to open
+                    await page.screenshot(path=os.path.join(output_dir, "2_after_participants_click.png"))
+                    print("📸 Screenshot saved: 2_after_participants_click.png")
+
                     participant_list_selector = '[data-tid="participant-item"]'
                     await page.locator(participant_list_selector).first.wait_for(state="visible", timeout=15000)
 
