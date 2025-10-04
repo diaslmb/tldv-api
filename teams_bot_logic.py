@@ -80,22 +80,21 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await name_input.wait_for(state="visible", timeout=30000)
             await name_input.fill("SHAI AI Notetaker")
 
-            # --- FINAL MICROPHONE FIX ---
+            # --- FINAL ROBUST MICROPHONE FIX ---
             try:
-                # This selector is more specific, targeting the switch role for the microphone.
-                mic_switch = page.get_by_role("switch", name=re.compile("Microphone", re.IGNORECASE))
-                await mic_switch.wait_for(state="visible", timeout=15000)
+                # This targets the div that is visually the button, ensuring it's the correct one.
+                mic_button_container = page.locator("div[data-tid='prejoin-microphone-button']")
+                await mic_button_container.wait_for(state="visible", timeout=15000)
                 
-                is_mic_on = await mic_switch.get_attribute("aria-checked")
+                is_mic_on = await mic_button_container.get_attribute("aria-checked")
                 if is_mic_on == "true":
                     print("🎤 Microphone is ON, attempting to turn it OFF.")
-                    await mic_switch.click()
+                    await mic_button_container.click()
                     print("✅ Microphone should now be OFF.")
                 else:
                     print("🎤 Microphone is already OFF.")
             except Exception as e:
                 print(f"⚠️  Could not change microphone state: {e}")
-
 
             join_button_locator = page.get_by_role("button", name="Join now")
             await join_button_locator.wait_for(timeout=15000)
@@ -109,39 +108,41 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await asyncio.sleep(5)
 
             while True:
-                await asyncio.sleep(5)
+                await asyncio.sleep(10) # Increased delay to prevent rapid, unnecessary checks
 
-                # --- FINAL PARTICIPANT COUNT FIX ---
+                # --- FINAL ROBUST PARTICIPANT COUNT FIX ---
                 try:
                     if job_status.get(job_id, {}).get("status") == "stopping":
                         print("Stop signal received, leaving meeting.")
                         break
 
                     lobby_text_pattern = re.compile("waiting for others to join|Someone in the meeting should let you in soon|Ожидание присоединения других участников", re.IGNORECASE)
-                    if await page.get_by_text(lobby_text_pattern).is_visible():
+                    if await page.locator(f"text=/{lobby_text_pattern.pattern}/").is_visible():
                         print("🕒 Bot is in the lobby, waiting...")
                         continue
 
-                    # Read the count directly from the button's label instead of opening the panel.
                     participant_button = page.get_by_role("button", name=re.compile("People|Participants|Участники", re.IGNORECASE))
-                    await participant_button.wait_for(state="visible", timeout=10000)
+                    await participant_button.click()
+
+                    # Wait for the participant list panel to become visible
+                    participants_panel = page.get_by_role("complementary", name="Participants")
+                    await participants_panel.wait_for(state="visible", timeout=15000)
                     
-                    button_label = await participant_button.get_attribute("aria-label")
-                    if button_label:
-                        match = re.search(r'\d+', button_label)
-                        if match:
-                            participant_count = int(match.group())
-                            print(f"👥 Found {participant_count} participant(s) from button label.")
-                            if participant_count <= 1:
-                                print("Only 1 participant left. Ending recording.")
-                                break
-                        else:
-                             print("⚠️ Could not find participant count number in button label. Assuming 2.")
-                    else:
-                        print("⚠️ Could not read aria-label from participant button. Assuming 2.")
+                    # Wait for at least one participant item to appear in the list
+                    await participants_panel.locator('[data-tid="participant-item"]').first.wait_for(state="visible", timeout=10000)
+                    
+                    participant_count = await participants_panel.locator('[data-tid="participant-item"]').count()
+                    print(f"👥 Found {participant_count} participant(s).")
+
+                    if participant_count <= 1:
+                        print("Only 1 participant left. Ending recording.")
+                        break
+                    
+                    # Close the panel to avoid interfering with other operations
+                    await participant_button.click()
 
                 except (TimeoutError, AttributeError) as e:
-                    print(f"❌ Could not find participant button: {e}. Ending recording.")
+                    print(f"❌ Could not find/count participants: {e}. Ending recording.")
                     await page.screenshot(path=os.path.join(output_dir, "participant_error.png"))
                     break
         except Exception as e:
