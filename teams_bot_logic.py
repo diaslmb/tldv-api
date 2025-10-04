@@ -103,4 +103,80 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             await join_button_locator.click(timeout=15000)
 
-            await page.get_by_role("button", name=re.compile("Leave|
+            await page.get_by_role("button", name=re.compile("Leave|Hang up|Выйти", re.IGNORECASE)).wait_for(state="visible", timeout=45000)
+            print("✅ Bot has successfully joined the meeting.")
+            await asyncio.sleep(5)
+
+            while True:
+                await asyncio.sleep(10)
+
+                # --- FINAL ROBUST PARTICIPANT COUNT FIX ---
+                try:
+                    if job_status.get(job_id, {}).get("status") == "stopping":
+                        print("Stop signal received, leaving meeting.")
+                        break
+
+                    lobby_text_pattern = re.compile("waiting for others to join|Someone in the meeting should let you in soon|Ожидание присоединения других участников", re.IGNORECASE)
+                    if await page.locator(f"text=/{lobby_text_pattern.pattern}/").is_visible():
+                        print("🕒 Bot is in the lobby, waiting...")
+                        continue
+
+                    participant_button = page.get_by_role("button", name=re.compile("People|Participants|Участники", re.IGNORECASE))
+                    await participant_button.click()
+
+                    participants_panel = page.get_by_role("complementary", name="Participants")
+                    await participants_panel.wait_for(state="visible", timeout=15000)
+                    
+                    # This waits for the list to be populated before counting
+                    await participants_panel.locator("ul").first.wait_for(state="visible", timeout=10000)
+                    
+                    participant_count = await participants_panel.get_by_role("listitem").count()
+                    print(f"👥 Found {participant_count} participant(s).")
+
+                    if participant_count <= 1:
+                        print("Only 1 participant left. Ending recording.")
+                        break
+                    
+                    await participant_button.click()
+
+                except (TimeoutError, AttributeError) as e:
+                    print(f"❌ Could not find/count participants: {e}. Ending recording.")
+                    await page.screenshot(path=os.path.join(output_dir, "participant_error.png"))
+                    break
+        except Exception as e:
+            job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
+            await page.screenshot(path=os.path.join(output_dir, "error.png"))
+        finally:
+            if recorder and recorder.poll() is None:
+                recorder.terminate()
+                recorder.communicate()
+
+            try:
+                await page.get_by_role("button", name=re.compile("Leave|Hang up|Выйти", re.IGNORECASE)).click(timeout=5000)
+                await asyncio.sleep(3)
+            except Exception: pass
+
+            await browser.close()
+
+    if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 1024:
+        job_status[job_id] = {"status": "transcribing"}
+        transcription_success = transcribe_audio(output_audio_path, output_transcript_path)
+
+        if transcription_success:
+            job_status[job_id] = {"status": "summarizing"}
+            summarizer = WorkflowAgentProcessor(base_url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
+
+            file_id = await summarizer.upload_file(output_transcript_path)
+            if file_id:
+                summary_pdf_path = os.path.join(output_dir, "summary.pdf")
+                summary_success = await summarizer.run_workflow(file_id, summary_pdf_path)
+                if summary_success:
+                    job_status[job_id] = {"status": "completed", "transcript_path": output_transcript_path, "summary_path": summary_pdf_path}
+                else:
+                    job_status[job_id] = {"status": "failed", "error": "Summarization failed."}
+            else:
+                 job_status[job_id] = {"status": "failed", "error": "File upload for summarization failed."}
+        else:
+            job_status[job_id] = {"status": "failed", "error": "Transcription failed"}
+    else:
+        job_status[job_id] = {"status": "failed", "error": "Audio recording was empty or failed"}
