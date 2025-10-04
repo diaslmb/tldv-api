@@ -80,17 +80,16 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await name_input.wait_for(state="visible", timeout=30000)
             await name_input.fill("SHAI AI Notetaker")
 
-            # --- REVISED MICROPHONE LOGIC v2 ---
+            # --- FINAL MICROPHONE FIX ---
             try:
-                # This selector targets an element with an aria-label containing "Microphone", case-insensitive.
-                mic_button = page.locator('[aria-label*="Microphone"i]')
-                await mic_button.wait_for(state="visible", timeout=15000)
+                # This selector is more specific, targeting the switch role for the microphone.
+                mic_switch = page.get_by_role("switch", name=re.compile("Microphone", re.IGNORECASE))
+                await mic_switch.wait_for(state="visible", timeout=15000)
                 
-                # The state is indicated by the 'aria-checked' attribute.
-                is_mic_on = await mic_button.get_attribute("aria-checked")
+                is_mic_on = await mic_switch.get_attribute("aria-checked")
                 if is_mic_on == "true":
                     print("🎤 Microphone is ON, attempting to turn it OFF.")
-                    await mic_button.click()
+                    await mic_switch.click()
                     print("✅ Microphone should now be OFF.")
                 else:
                     print("🎤 Microphone is already OFF.")
@@ -112,6 +111,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             while True:
                 await asyncio.sleep(5)
 
+                # --- FINAL PARTICIPANT COUNT FIX ---
                 try:
                     if job_status.get(job_id, {}).get("status") == "stopping":
                         print("Stop signal received, leaving meeting.")
@@ -122,27 +122,26 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         print("🕒 Bot is in the lobby, waiting...")
                         continue
 
+                    # Read the count directly from the button's label instead of opening the panel.
                     participant_button = page.get_by_role("button", name=re.compile("People|Participants|Участники", re.IGNORECASE))
-                    await participant_button.click()
-
-                    await asyncio.sleep(2)
-
-                    participants_panel = page.get_by_role("complementary", name="Participants")
-                    await participants_panel.wait_for(state="visible", timeout=15000)
+                    await participant_button.wait_for(state="visible", timeout=10000)
                     
-                    participant_items = participants_panel.get_by_role("listitem")
-                    participant_count = await participant_items.count()
-                    
-                    print(f"👥 Found {participant_count} participant(s).")
-
-                    if participant_count <= 1:
-                        print("Only 1 participant left. Ending recording.")
-                        break
-
-                    await participant_button.click()
+                    button_label = await participant_button.get_attribute("aria-label")
+                    if button_label:
+                        match = re.search(r'\d+', button_label)
+                        if match:
+                            participant_count = int(match.group())
+                            print(f"👥 Found {participant_count} participant(s) from button label.")
+                            if participant_count <= 1:
+                                print("Only 1 participant left. Ending recording.")
+                                break
+                        else:
+                             print("⚠️ Could not find participant count number in button label. Assuming 2.")
+                    else:
+                        print("⚠️ Could not read aria-label from participant button. Assuming 2.")
 
                 except (TimeoutError, AttributeError) as e:
-                    print(f"❌ Could not find participant count: {e}. Ending recording.")
+                    print(f"❌ Could not find participant button: {e}. Ending recording.")
                     await page.screenshot(path=os.path.join(output_dir, "participant_error.png"))
                     break
         except Exception as e:
