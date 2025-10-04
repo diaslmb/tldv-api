@@ -80,19 +80,25 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await name_input.wait_for(state="visible", timeout=30000)
             await name_input.fill("SHAI AI Notetaker")
 
-            # --- SCREENSHOT DEBUGGING 1 ---
             await page.screenshot(path=os.path.join(output_dir, "1_pre_join_screen.png"))
             print("📸 Screenshot saved: 1_pre_join_screen.png")
 
+            # --- REVISED MICROPHONE LOGIC ---
             try:
-                mic_button = page.locator('[data-tid="toggle-mute"]')
-                await mic_button.wait_for(state="visible", timeout=10000)
-                is_mic_on = await mic_button.get_attribute("aria-checked")
+                # This selector targets the first switch found, which is the microphone on the pre-join screen.
+                mic_switch = page.locator('div[role="switch"]').first
+                await mic_switch.wait_for(state="visible", timeout=10000)
+                
+                is_mic_on = await mic_switch.get_attribute("aria-checked")
                 if is_mic_on == "true":
-                    await mic_button.click()
-                    print("✅ Microphone turned off.")
-            except Exception:
-                print("🎤 Microphone state could not be changed or was already off.")
+                    print("🎤 Microphone is ON, attempting to turn it OFF.")
+                    await mic_switch.click()
+                    print("✅ Microphone should now be OFF.")
+                else:
+                    print("🎤 Microphone is already OFF.")
+            except Exception as e:
+                print(f"⚠️  Could not change microphone state: {e}")
+
 
             join_button_locator = page.get_by_role("button", name="Join now")
             await join_button_locator.wait_for(timeout=15000)
@@ -101,36 +107,38 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             await join_button_locator.click(timeout=15000)
 
-            await page.get_by_role("button", name=re.compile("Leave|Hang up", re.IGNORECASE)).wait_for(state="visible", timeout=45000)
+            await page.get_by_role("button", name=re.compile("Leave|Hang up|Выйти", re.IGNORECASE)).wait_for(state="visible", timeout=45000)
             print("✅ Bot has successfully joined the meeting.")
             await asyncio.sleep(5)
 
             while True:
                 await asyncio.sleep(5)
 
+                # --- REVISED PARTICIPANT COUNT LOGIC ---
                 try:
                     if job_status.get(job_id, {}).get("status") == "stopping":
                         print("Stop signal received, leaving meeting.")
                         break
-                    
+
                     lobby_text_pattern = re.compile("waiting for others to join|Someone in the meeting should let you in soon|Ожидание присоединения других участников", re.IGNORECASE)
-                    is_in_lobby = await page.get_by_text(lobby_text_pattern).is_visible()
-                    if is_in_lobby:
+                    if await page.get_by_text(lobby_text_pattern).is_visible():
                         print("🕒 Bot is in the lobby, waiting...")
                         continue
 
                     participant_button = page.get_by_role("button", name=re.compile("People|Participants|Участники", re.IGNORECASE))
                     await participant_button.click()
 
-                    # --- SCREENSHOT DEBUGGING 2 ---
                     await asyncio.sleep(2) # Wait for panel to open
                     await page.screenshot(path=os.path.join(output_dir, "2_after_participants_click.png"))
-                    print("📸 Screenshot saved: 2_after_participants_click.png")
 
-                    participant_list_selector = '[data-tid="participant-item"]'
-                    await page.locator(participant_list_selector).first.wait_for(state="visible", timeout=15000)
-
-                    participant_count = await page.locator(participant_list_selector).count()
+                    # Locate the panel by its role and name, then find the list items within it.
+                    participants_panel = page.get_by_role("complementary", name="Participants")
+                    await participants_panel.wait_for(state="visible", timeout=15000)
+                    
+                    # Each participant is in a 'listitem' role
+                    participant_items = participants_panel.get_by_role("listitem")
+                    participant_count = await participant_items.count()
+                    
                     print(f"👥 Found {participant_count} participant(s).")
 
                     if participant_count <= 1:
@@ -152,7 +160,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 recorder.communicate()
 
             try:
-                await page.get_by_role("button", name=re.compile("Leave|Hang up", re.IGNORECASE)).click(timeout=5000)
+                await page.get_by_role("button", name=re.compile("Leave|Hang up|Выйти", re.IGNORECASE)).click(timeout=5000)
                 await asyncio.sleep(3)
             except Exception: pass
 
