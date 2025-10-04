@@ -9,7 +9,8 @@ from summarizer import WorkflowAgentProcessor
 
 # --- CONFIGURATION ---
 MAX_MEETING_DURATION_SECONDS = 10800
-WHISPERX_URL = "http://localhost:8000/v1/audio/transcriptions"
+# --- THIS IS THE LINE THAT WAS CHANGED ---
+WHISPERX_URL = "http://88.204.158.4:8080/v1/audio/transcriptions"
 
 def get_ffmpeg_command(platform, duration, output_path):
     if platform.startswith("linux"):
@@ -24,7 +25,9 @@ def transcribe_audio(audio_path, transcript_path):
     try:
         with open(audio_path, 'rb') as f:
             files = {'file': (os.path.basename(audio_path), f)}
-            response = requests.post(WHISPERX_URL, files=files)
+            # --- THIS IS THE LINE THAT WAS CHANGED ---
+            data = {'model': 'whisper-large-v3'}
+            response = requests.post(WHISPERX_URL, files=files, data=data)
         if response.status_code == 200:
             transcript_data = response.json()
             clean_transcript = transcript_data.get('text', '').replace('<br>', '\n')
@@ -81,10 +84,10 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             # --- NEW ROBUST MIC/CAMERA LOGIC ---
             try:
-                mic_button = page.get_by_role("button", name=re.compile("Microphone", re.IGNORECASE))
+                mic_button = page.locator('[data-tid="toggle-mute"]')
                 await mic_button.wait_for(state="visible", timeout=10000)
-                # Check if the button is pressed (aria-pressed="true" means ON)
-                if await mic_button.get_attribute("aria-pressed") == "true":
+                is_mic_on = await mic_button.get_attribute("aria-checked")
+                if is_mic_on == "true":
                     await mic_button.click()
                     print("✅ Microphone turned off.")
             except Exception:
@@ -118,7 +121,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         print("Stop signal received, leaving meeting.")
                         break
                     
-                    # --- CORRECTED LOBBY DETECTION SELECTOR ---
                     lobby_text_pattern = re.compile("waiting for others to join|Someone in the meeting should let you in soon|Ожидание присоединения других участников", re.IGNORECASE)
                     is_in_lobby = await page.get_by_text(lobby_text_pattern).is_visible()
                     if is_in_lobby:
