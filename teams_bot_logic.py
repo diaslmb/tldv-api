@@ -80,19 +80,17 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await name_input.wait_for(state="visible", timeout=30000)
             await name_input.fill("SHAI AI Notetaker")
 
-            await page.screenshot(path=os.path.join(output_dir, "1_pre_join_screen.png"))
-            print("📸 Screenshot saved: 1_pre_join_screen.png")
-
-            # --- REVISED MICROPHONE LOGIC ---
+            # --- REVISED MICROPHONE LOGIC v2 ---
             try:
-                # This selector targets the first switch found, which is the microphone on the pre-join screen.
-                mic_switch = page.locator('div[role="switch"]').first
-                await mic_switch.wait_for(state="visible", timeout=10000)
+                # This selector targets an element with an aria-label containing "Microphone", case-insensitive.
+                mic_button = page.locator('[aria-label*="Microphone"i]')
+                await mic_button.wait_for(state="visible", timeout=15000)
                 
-                is_mic_on = await mic_switch.get_attribute("aria-checked")
+                # The state is indicated by the 'aria-checked' attribute.
+                is_mic_on = await mic_button.get_attribute("aria-checked")
                 if is_mic_on == "true":
                     print("🎤 Microphone is ON, attempting to turn it OFF.")
-                    await mic_switch.click()
+                    await mic_button.click()
                     print("✅ Microphone should now be OFF.")
                 else:
                     print("🎤 Microphone is already OFF.")
@@ -114,7 +112,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             while True:
                 await asyncio.sleep(5)
 
-                # --- REVISED PARTICIPANT COUNT LOGIC ---
                 try:
                     if job_status.get(job_id, {}).get("status") == "stopping":
                         print("Stop signal received, leaving meeting.")
@@ -128,14 +125,11 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     participant_button = page.get_by_role("button", name=re.compile("People|Participants|Участники", re.IGNORECASE))
                     await participant_button.click()
 
-                    await asyncio.sleep(2) # Wait for panel to open
-                    await page.screenshot(path=os.path.join(output_dir, "2_after_participants_click.png"))
+                    await asyncio.sleep(2)
 
-                    # Locate the panel by its role and name, then find the list items within it.
                     participants_panel = page.get_by_role("complementary", name="Participants")
                     await participants_panel.wait_for(state="visible", timeout=15000)
                     
-                    # Each participant is in a 'listitem' role
                     participant_items = participants_panel.get_by_role("listitem")
                     participant_count = await participant_items.count()
                     
@@ -145,7 +139,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         print("Only 1 participant left. Ending recording.")
                         break
 
-                    await participant_button.click() # Close the participant list
+                    await participant_button.click()
 
                 except (TimeoutError, AttributeError) as e:
                     print(f"❌ Could not find participant count: {e}. Ending recording.")
