@@ -9,7 +9,8 @@ from summarizer import WorkflowAgentProcessor
 
 # --- CONFIGURATION ---
 MAX_MEETING_DURATION_SECONDS = 10800
-WHISPERX_URL = "http://localhost:8000/v1/audio/transcriptions"
+# --- THIS IS THE LINE THAT WAS CHANGED ---
+WHISPERX_URL = "http://88.204.158.4:8080/v1/audio/transcriptions"
 
 def get_ffmpeg_command(platform, duration, output_path):
     if platform.startswith("linux"):
@@ -24,7 +25,9 @@ def transcribe_audio(audio_path, transcript_path):
     try:
         with open(audio_path, 'rb') as f:
             files = {'file': (os.path.basename(audio_path), f)}
-            response = requests.post(WHISPERX_URL, files=files)
+            # --- THIS IS THE LINE THAT WAS CHANGED ---
+            data = {'model': 'whisper-large-v3'}
+            response = requests.post(WHISPERX_URL, files=files, data=data)
         if response.status_code == 200:
             transcript_data = response.json()
             clean_transcript = transcript_data.get('text', '').replace('<br>', '\n')
@@ -90,7 +93,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await asyncio.sleep(10)
 
             while True:
-                # --- THIS IS THE LINE THAT WAS CHANGED ---
                 await asyncio.sleep(4) # Check every 4 seconds for better responsiveness
                 
                 try:
