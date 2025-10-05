@@ -70,11 +70,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
     job_status[job_id] = {"status": "starting_browser"}
     async with async_playwright() as p:
         try:
-            browser = await p.chromium.launch(headless=False, args=[
-                "--disable-blink-features=AutomationControlled",
-                "--use-fake-ui-for-media-stream",
-                "--use-fake-device-for-media-stream"
-            ])
+            browser = await p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
             context = await browser.new_context(permissions=["microphone", "camera"])
             page = await context.new_page()
         except Exception as e:
@@ -89,56 +85,58 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
             meeting_id_placeholder = re.compile("Meeting ID|Идентификатор конференции", re.IGNORECASE)
             await page.get_by_placeholder(meeting_id_placeholder).fill(meeting_id)
-
             join_button_text = re.compile("Join|Подключиться", re.IGNORECASE)
             await page.get_by_role("button", name=join_button_text).click()
             print(f"✅ Entered Meeting ID: {meeting_id}")
 
+            # The entire join form and meeting UI is in an iframe. Let's define it once.
+            frame = page.frame_locator('iframe').first
+            
+            # Wait for an element inside the iframe to ensure it's loaded
+            await frame.locator('body').wait_for(timeout=30000)
+            print("✅ Pre-join iframe is ready.")
+
+            # Mute and Stop Video on the pre-join screen
             try:
-                popup1_text = re.compile("Continue without microphone and camera|Продолжить без микрофона и камеры", re.IGNORECASE)
-                await page.get_by_role("button", name=popup1_text).click(timeout=10000)
-                print("✅ Handled first permission pop-up.")
-                popup2_text = re.compile("Continue without microphone|Продолжить без микрофона", re.IGNORECASE)
-                await page.get_by_role("button", name=popup2_text).click(timeout=10000)
-                print("✅ Handled second permission pop-up.")
-            except TimeoutError:
-                print("ℹ️ Permission pop-ups did not appear, proceeding.")
-            
-            # *** FINAL FIX: Locate the iframe and type into it ***
-            # Find the iframe that contains the form.
-            frame_locator = page.frame_locator('iframe[title="Zoom Web App"], iframe').first
-            await frame_locator.locator('body').wait_for(timeout=30000)
-            print("✅ Form iframe is ready.")
+                mute_button = frame.get_by_role("button", name="Mute")
+                await mute_button.wait_for(state="visible", timeout=10000)
+                if await mute_button.is_enabled():
+                    await mute_button.click()
+                    print("✅ Microphone muted on pre-join screen.")
 
-            # Focus the first input field within the frame.
-            first_input = frame_locator.locator('input[type="password"], input[type="text"]').first
-            await first_input.focus()
-            print("✅ Focused on the first input (Passcode).")
-            
-            # Type the passcode.
+                stop_video_button = frame.get_by_role("button", name="Stop Video")
+                await stop_video_button.wait_for(state="visible", timeout=10000)
+                if await stop_video_button.is_enabled():
+                    await stop_video_button.click()
+                    print("✅ Video stopped on pre-join screen.")
+            except Exception as e:
+                print(f"⚠️ Could not mute or stop video, proceeding anyway: {e}")
+
+            # Use keyboard to fill form
+            await frame.locator('input[type="password"], input[type="text"]').first.focus()
             await page.keyboard.type(pwd)
-            print("✅ Typed passcode.")
-
-            # Tab to the next field (Name) and type.
             await page.keyboard.press("Tab")
             await page.keyboard.type("SHAI AI Notetaker")
-            print("✅ Typed name.")
-
-            # Tab twice to skip "Remember Me" and focus the Join button.
             await page.keyboard.press("Tab")
             await page.keyboard.press("Tab")
-            
-            # "Click" the focused Join button by pressing Enter.
             await page.keyboard.press("Enter")
             print("✅ Submitted form via keyboard.")
 
-            await page.get_by_role("button", name=re.compile("Leave", re.I)).wait_for(state="visible", timeout=60000)
-            
+            # Wait for the meeting to load by looking for the "Leave" button INSIDE THE FRAME
+            await frame.get_by_role("button", name=re.compile("Leave", re.I)).wait_for(state="visible", timeout=60000)
+            print("✅ Successfully joined meeting.")
+
             job_status[job_id] = {"status": "recording"}
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            print("✅ Bot has joined the meeting and started recording.")
+            print("✅ Audio recording started.")
             
-            await asyncio.sleep(10)
+            await asyncio.sleep(5)
+            # Dismiss any "What's new" popups
+            try:
+                await frame.get_by_role("button", name="OK").click(timeout=5000)
+                print("ℹ️ Dismissed 'OK' popup.")
+            except:
+                pass
 
             while True:
                 await asyncio.sleep(5)
@@ -146,17 +144,17 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     print("Stop signal received, leaving meeting.")
                     break
                 try:
-                    participants_button = page.get_by_role("button", name=re.compile("Participants", re.I))
+                    # Check participants INSIDE THE FRAME
+                    participants_button = frame.get_by_role("button", name=re.compile("Participants", re.I))
                     participant_count_text = await participants_button.inner_text()
                     match = re.search(r'\d+', participant_count_text)
-                    if match:
-                        count = int(match.group())
-                        print(f"👥 Found {count} participant(s).")
-                        if count <= 1:
-                            print("🚪 Only 1 participant left. Ending recording.")
-                            break
-                except Exception as e:
-                    print(f"⚠️ Could not check participant count, assuming meeting is ongoing. Error: {e}")
+                    if match and int(match.group()) <= 1:
+                        print("🚪 Only 1 participant left. Ending recording.")
+                        break
+                except Exception:
+                    # If the button isn't found, the meeting may have ended
+                    print("⚠️ Could not find participants button, assuming meeting ended.")
+                    break
 
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
@@ -165,13 +163,14 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             if recorder and recorder.poll() is None:
                 recorder.terminate()
                 recorder.communicate()
-
             try:
-                await page.get_by_role("button", name=re.compile("^Leave$", re.I)).click(timeout=5000)
-                try:
-                    await page.get_by_role("button", name=re.compile("Leave Meeting", re.I)).click(timeout=5000)
-                except TimeoutError:
-                    pass
+                # Leave the meeting from INSIDE THE FRAME
+                print("Attempting to leave meeting...")
+                leave_button = page.frame_locator('iframe').first.get_by_role("button", name=re.compile("Leave", re.I))
+                await leave_button.click(timeout=5000)
+                # Confirm leaving
+                await page.get_by_role("button", name=re.compile("Leave Meeting", re.I)).click(timeout=5000)
+                print("✅ Left meeting.")
             except Exception as e:
                 print(f"Could not click leave button: {e}")
             await browser.close()
@@ -179,7 +178,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
     if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 1024:
         job_status[job_id] = {"status": "transcribing"}
         transcription_success = transcribe_audio(output_audio_path, output_transcript_path)
-
         if transcription_success:
             job_status[job_id] = {"status": "summarizing"}
             summarizer = WorkflowAgentProcessor(base_url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
