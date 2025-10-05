@@ -122,10 +122,11 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             join_button_text = re.compile("Join|Подключиться", re.IGNORECASE)
             await page.get_by_role("button", name=join_button_text).click()
             
-            # --- FIX: Handle Cookie Consent Dialog ---
+            # --- FINAL FIX: Handle Cookie Consent Dialog IMMEDIATELY ---
             try:
-                # The cookie button appears on the main page, not in an iframe.
-                accept_cookies_button = page.get_by_role("button", name="Accept Cookies")
+                # This button appears on the main page, not in the iframe.
+                # Using a more robust, case-insensitive selector.
+                accept_cookies_button = page.get_by_role("button", name=re.compile("Accept Cookies", re.I))
                 await accept_cookies_button.wait_for(state="visible", timeout=15000)
                 await accept_cookies_button.click()
                 print("✅ Accepted cookies.")
@@ -133,6 +134,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             except TimeoutError:
                 print("ℹ️ Cookie consent dialog did not appear.")
 
+            # Now that the cookie banner is handled, we can safely access the iframe.
             frame = page.frame_locator('iframe').first
             await frame.locator('body').wait_for(timeout=30000)
             await snap("03_pre_join_iframe_ready")
