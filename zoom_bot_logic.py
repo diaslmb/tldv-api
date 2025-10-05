@@ -104,27 +104,33 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             except TimeoutError:
                 print("ℹ️ Permission pop-ups did not appear, proceeding.")
             
-            # *** FINAL FIX: Use keyboard to fill the form ***
-            # Wait for any input field to be ready to ensure the form is loaded
-            await page.wait_for_selector('input', timeout=30000)
-            print("✅ Form is ready.")
+            # *** FINAL FIX: Locate the iframe and type into it ***
+            # Find the iframe that contains the form.
+            frame_locator = page.frame_locator('iframe[title="Zoom Web App"], iframe').first
+            await frame_locator.locator('body').wait_for(timeout=30000)
+            print("✅ Form iframe is ready.")
 
-            # Type passcode into the first field (which will be focused by default)
+            # Focus the first input field within the frame.
+            first_input = frame_locator.locator('input[type="password"], input[type="text"]').first
+            await first_input.focus()
+            print("✅ Focused on the first input (Passcode).")
+            
+            # Type the passcode.
             await page.keyboard.type(pwd)
             print("✅ Typed passcode.")
 
-            # Tab to the next field (Name) and type
+            # Tab to the next field (Name) and type.
             await page.keyboard.press("Tab")
             await page.keyboard.type("SHAI AI Notetaker")
             print("✅ Typed name.")
 
-            # Tab twice to skip "Remember Me" and focus the Join button
+            # Tab twice to skip "Remember Me" and focus the Join button.
             await page.keyboard.press("Tab")
             await page.keyboard.press("Tab")
             
-            # "Click" the focused Join button by pressing Enter
+            # "Click" the focused Join button by pressing Enter.
             await page.keyboard.press("Enter")
-            print("✅ Clicked final Join button via keyboard.")
+            print("✅ Submitted form via keyboard.")
 
             await page.get_by_role("button", name=re.compile("Leave", re.I)).wait_for(state="visible", timeout=60000)
             
