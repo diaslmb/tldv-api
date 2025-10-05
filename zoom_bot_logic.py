@@ -74,24 +74,40 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             job_status[job_id] = {"status": "navigating"}
             await page.goto(meeting_url, timeout=90000)
 
-            # Click "Join from Your Browser" if it appears
+            # *** FIX: Handle the interstitial page by clicking "Join from Browser" ***
             try:
-                await page.get_by_role("link", name=re.compile("Join from your browser", re.I)).click(timeout=15000)
+                join_from_browser_button = page.get_by_role("link", name=re.compile("Join from your browser", re.I))
+                await join_from_browser_button.wait_for(state="visible", timeout=15000)
+                await join_from_browser_button.click()
             except TimeoutError:
-                pass # Ignore if not present
+                print("⚠️ 'Join from browser' button not found, proceeding directly.")
+                pass 
 
-            # Enter name and join
-            await page.locator('input[type="text"]').fill("SHAI.PRO Notetaker")
-            await page.get_by_role("button", name=re.compile("Join", re.I)).click()
+            # Handle cookie consent if it appears
+            try:
+                await page.get_by_role("button", name="Cookies Settings").click(timeout=5000)
+            except TimeoutError:
+                pass
+
+            # Fill name and mute before joining
+            name_input = page.get_by_placeholder("Your Name")
+            await name_input.wait_for(state="visible", timeout=30000)
+            await name_input.fill("SHAI AI Notetaker")
             
-            # Wait to enter the meeting room
-            await page.get_by_role("button", name=re.compile("Leave", re.I)).wait_for(state="visible", timeout=45000)
+            # Mute microphone on pre-join screen
+            await page.get_by_role("button", name="Mute").click(timeout=5000)
+            
+            # Join the meeting
+            await page.get_by_role("button", name=re.compile(r"^Join$", re.I)).click()
+            
+            # Wait to enter the meeting room by looking for the leave button
+            await page.get_by_role("button", name=re.compile("Leave", re.I)).wait_for(state="visible", timeout=60000)
             
             job_status[job_id] = {"status": "recording"}
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             print("✅ Bot has joined the meeting and started recording.")
             
-            await asyncio.sleep(10) # Initial wait for UI to stabilize
+            await asyncio.sleep(10)
 
             while True:
                 await asyncio.sleep(5)
@@ -102,24 +118,25 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
                 try:
                     # Click the participants button to open the list
-                    await page.get_by_role("button", name=re.compile("Participants", re.I)).click()
+                    participants_button = page.get_by_role("button", name=re.compile("Participants", re.I))
+                    await participants_button.click()
                     await asyncio.sleep(1)
 
-                    # Count the number of participants in the list
-                    participant_list_selector = '[class*="participants-ul--"]'
-                    participants = await page.locator(f'{participant_list_selector} > li').count()
-                    print(f"👥 Found {participants} participant(s).")
-                    
-                    if participants <= 1:
-                        print("🚪 Only 1 participant left. Ending recording.")
-                        break
+                    # Count the number of participants
+                    participant_count_text = await participants_button.inner_text()
+                    match = re.search(r'\d+', participant_count_text)
+                    if match:
+                        count = int(match.group())
+                        print(f"👥 Found {count} participant(s).")
+                        if count <= 1:
+                            print("🚪 Only 1 participant left. Ending recording.")
+                            break
                     
                     # Close the participants pane
-                    await page.get_by_role("button", name=re.compile("Participants", re.I)).click()
+                    await participants_button.click()
 
                 except Exception as e:
                     print(f"⚠️ Could not check participant count, assuming meeting is ongoing. Error: {e}")
-
 
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
@@ -130,13 +147,11 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 recorder.communicate()
 
             try:
-                # Use a reliable selector for the leave button
-                await page.get_by_role("button", name=re.compile("Leave", re.I)).click(timeout=5000)
-                # Handle confirmation dialog if it appears
+                await page.get_by_role("button", name=re.compile("^Leave$", re.I)).click(timeout=5000)
                 try:
                     await page.get_by_role("button", name=re.compile("Leave Meeting", re.I)).click(timeout=5000)
                 except TimeoutError:
-                    pass # No confirmation needed
+                    pass
             except Exception as e:
                 print(f"Could not click leave button: {e}")
 
