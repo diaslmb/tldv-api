@@ -87,7 +87,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await page.goto("https://app.zoom.us/wc/join", timeout=60000)
             print("✅ Navigated to join page.")
 
-            # *** FIX: Use bilingual selector for Meeting ID input ***
             meeting_id_placeholder = re.compile("Meeting ID|Идентификатор конференции", re.IGNORECASE)
             await page.get_by_placeholder(meeting_id_placeholder).fill(meeting_id)
 
@@ -95,19 +94,32 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await page.get_by_role("button", name=join_button_text).click()
             print(f"✅ Entered Meeting ID: {meeting_id}")
 
-            # Handle bilingual popups
-            popup1_text = re.compile("Continue without microphone and camera|Продолжить без микрофона и камеры", re.IGNORECASE)
-            await page.get_by_role("button", name=popup1_text).click(timeout=15000)
-            print("✅ Handled first permission pop-up.")
+            # *** FIX: Handle popups as optional ***
+            try:
+                popup1_text = re.compile("Continue without microphone and camera|Продолжить без микрофона и камеры", re.IGNORECASE)
+                await page.get_by_role("button", name=popup1_text).click(timeout=10000) # Shorter timeout
+                print("✅ Handled first permission pop-up.")
 
-            popup2_text = re.compile("Continue without microphone|Продолжить без микрофона", re.IGNORECASE)
-            await page.get_by_role("button", name=popup2_text).click(timeout=15000)
-            print("✅ Handled second permission pop-up.")
+                popup2_text = re.compile("Continue without microphone|Продолжить без микрофона", re.IGNORECASE)
+                await page.get_by_role("button", name=popup2_text).click(timeout=10000)
+                print("✅ Handled second permission pop-up.")
+            except TimeoutError:
+                print("ℹ️ Permission pop-ups did not appear, proceeding.")
 
-            # Enter passcode and name with bilingual selectors
+            # *** FIX: Mute audio and stop video on the final join screen ***
             passcode_placeholder = re.compile("Meeting Passcode|Код доступа конференции", re.IGNORECASE)
-            await page.get_by_placeholder(passcode_placeholder).fill(pwd)
+            await page.get_by_placeholder(passcode_placeholder).wait_for(state="visible", timeout=30000)
+            
+            try:
+                await page.get_by_role("button", name="Mute").click(timeout=5000)
+                print("✅ Microphone muted.")
+                await page.get_by_role("button", name="Stop Video").click(timeout=5000)
+                print("✅ Video stopped.")
+            except Exception as e:
+                print(f"⚠️ Could not mute or stop video: {e}")
 
+            # Enter passcode and name
+            await page.get_by_placeholder(passcode_placeholder).fill(pwd)
             name_placeholder = re.compile("Your Name|Ваше имя", re.IGNORECASE)
             await page.get_by_placeholder(name_placeholder).fill("SHAI AI Notetaker")
             print("✅ Entered passcode and name.")
