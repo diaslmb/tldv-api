@@ -124,9 +124,9 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             # --- FIX: Handle Cookie Consent Dialog ---
             try:
-                # This button appears on the main page, not in the iframe.
+                # The cookie button appears on the main page, not in an iframe.
                 accept_cookies_button = page.get_by_role("button", name="Accept Cookies")
-                await accept_cookies_button.wait_for(state="visible", timeout=10000)
+                await accept_cookies_button.wait_for(state="visible", timeout=15000)
                 await accept_cookies_button.click()
                 print("✅ Accepted cookies.")
                 await snap("02_cookies_accepted")
