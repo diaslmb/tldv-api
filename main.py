@@ -2,6 +2,7 @@ import uuid
 import os
 import bot_logic as google_bot_logic
 import teams_bot_logic
+import zoom_bot_logic
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
@@ -12,15 +13,17 @@ from fastapi.middleware.cors import CORSMiddleware
 def get_platform(url: str) -> str:
     if "meet.google.com" in url:
         return "google"
-    elif "teams.live.com" in url:
+    elif "teams.live.com" in url or "teams.microsoft.com" in url:
         return "teams"
+    elif "zoom.us" in url:
+        return "zoom"
     else:
         return "unsupported"
 
 def check_url(url: str) -> str:
     platform = get_platform(url)
     if platform == "unsupported":
-        raise ValueError("URL must be a valid Google Meet or Microsoft Teams link")
+        raise ValueError("URL must be a valid Google Meet, Microsoft Teams, or Zoom link")
     return url
 
 Url = Annotated[str, AfterValidator(check_url)]
@@ -53,6 +56,8 @@ async def start_meeting(request: MeetingRequest, background_tasks: BackgroundTas
         background_tasks.add_task(google_bot_logic.run_bot_task, request.meeting_url, job_id, jobs)
     elif platform == "teams":
         background_tasks.add_task(teams_bot_logic.run_bot_task, request.meeting_url, job_id, jobs)
+    elif platform == "zoom":
+        background_tasks.add_task(zoom_bot_logic.run_bot_task, request.meeting_url, job_id, jobs)
     
     return {"message": f"Meeting bot started for {platform}.", "job_id": job_id}
 
