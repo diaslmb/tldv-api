@@ -11,10 +11,7 @@ MAX_MEETING_DURATION_SECONDS = 10800
 WHISPERX_URL = "http://88.204.158.4:8080/v1/audio/transcriptions"
 
 def get_pulse_audio_source():
-    """
-    Finds the correct PulseAudio monitor source for system audio recording.
-    This is the key to fixing the empty/noisy audio problem.
-    """
+    """Finds the correct PulseAudio monitor source for system audio recording."""
     try:
         result = subprocess.run(
             ["pactl", "list", "sources", "short"],
@@ -22,7 +19,6 @@ def get_pulse_audio_source():
         )
         if result.returncode == 0:
             for line in result.stdout.strip().split('\n'):
-                # A 'monitor' source is a loopback of the speaker output.
                 if '.monitor' in line:
                     source_name = line.split('\t')[1]
                     print(f"🔊 Found PulseAudio monitor source: {source_name}")
@@ -36,7 +32,7 @@ def get_ffmpeg_command(platform, duration, output_path):
         pulse_source = get_pulse_audio_source()
         return [
             "ffmpeg", "-y", "-f", "pulse", "-i", pulse_source,
-            "-ac", "2", "-ar", "44100", # Explicitly set audio parameters
+            "-ac", "2", "-ar", "44100",
             "-t", str(duration), output_path
         ]
     return None
@@ -48,7 +44,7 @@ def extract_meeting_details(url: str):
     return None, None
 
 def transcribe_audio(audio_path, transcript_path):
-    if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 4096: # Increased size check
+    if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 4096:
         print(f"❌ Audio file is missing or too small. Skipping transcription.")
         return False
     # ... (rest of the function is the same)
@@ -74,6 +70,7 @@ def transcribe_audio(audio_path, transcript_path):
     except Exception as e:
         print(f"An unexpected error occurred during transcription: {e}")
         return False
+
 
 async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
     import sys
@@ -102,11 +99,25 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             job_status[job_id] = {"status": "failed", "error": f"Failed to launch browser: {e}"}
             return
 
+        # --- Screenshot Helper ---
+        screenshot_count = 0
+        async def snap(name: str):
+            nonlocal screenshot_count
+            screenshot_count += 1
+            path = os.path.join(output_dir, f"{screenshot_count:02d}_{name}.png")
+            try:
+                await page.screenshot(path=path)
+                print(f"📸 Saved screenshot: {path}")
+            except Exception as e:
+                print(f"⚠️ Could not save screenshot {path}: {e}")
+
         recorder = None
         frame = None
         try:
             job_status[job_id] = {"status": "navigating"}
             await page.goto("https://app.zoom.us/wc/join", timeout=60000)
+            await snap("01_ navigated_to_join_page")
+            
             meeting_id_placeholder = re.compile("Meeting ID|Идентификатор конференции", re.IGNORECASE)
             await page.get_by_placeholder(meeting_id_placeholder).fill(meeting_id)
             join_button_text = re.compile("Join|Подключиться", re.IGNORECASE)
@@ -114,12 +125,11 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             frame = page.frame_locator('iframe').first
             await frame.locator('body').wait_for(timeout=30000)
-            print("✅ Pre-join iframe is ready.")
+            await snap("02_pre_join_iframe_ready")
             
-            # Mute and Stop Video on the pre-join screen
             await frame.get_by_role("button", name=re.compile("Mute|Выключить звук", re.I)).click(timeout=10000)
             await frame.get_by_role("button", name=re.compile("Stop Video|Остановить видео", re.I)).click(timeout=10000)
-            print("✅ Mic muted and video stopped on pre-join screen.")
+            await snap("03_mic_and_video_off")
 
             await frame.locator('input[type="password"], input[type="text"]').first.focus()
             await page.keyboard.type(pwd)
@@ -128,35 +138,31 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await page.keyboard.press("Tab")
             await page.keyboard.press("Tab")
             await page.keyboard.press("Enter")
-            print("✅ Submitted form via keyboard.")
+            await snap("04_form_submitted")
 
             await frame.get_by_role("button", name=re.compile("Leave|Завершение", re.I)).wait_for(state="visible", timeout=60000)
-            print("✅ Successfully joined meeting.")
+            await snap("05_in_meeting")
             
             job_status[job_id] = {"status": "recording"}
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            await asyncio.sleep(2) # Give ffmpeg a moment to start
+            await asyncio.sleep(2)
             if recorder.poll() is not None:
                 _, stderr = recorder.communicate()
                 raise Exception(f"ffmpeg failed to start: {stderr.decode()}")
             print("✅ Audio recording started.")
             
-            # --- ROBUST MIC MUTE LOGIC ---
             try:
-                # Click "Join Audio" to ensure we are connected
                 join_audio_btn = frame.get_by_role("button", name=re.compile("Join Audio by Computer|Подключить звук", re.I))
                 await join_audio_btn.click(timeout=15000)
-                print("✅ Joined computer audio.")
-                await asyncio.sleep(2) # Allow time for UI to update
+                await snap("06_joined_computer_audio")
+                await asyncio.sleep(2)
 
-                # Now, ensure we are muted. If we see "Unmute", we are good.
                 unmute_btn = frame.get_by_role("button", name=re.compile("Unmute|Включить звук", re.I))
-                if not await unmute_btn.is_visible():
-                    # If we don't see "Unmute", it means we see "Mute". Click it.
+                if not await unmute_btn.is_visible(timeout=5000):
                     await frame.get_by_role("button", name=re.compile("Mute|Выключить звук", re.I)).click()
-                    print("🎤 Re-muted microphone after joining audio.")
+                    await snap("07_mic_re-muted")
             except Exception:
-                print("ℹ️ 'Join Audio' prompt did not appear or was already handled.")
+                await snap("06_join_audio_prompt_not_found")
 
             while True:
                 await asyncio.sleep(5)
@@ -168,29 +174,28 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     count_text = await participants_button.get_attribute("aria-label") or ""
                     match = re.search(r'\d+', count_text)
                     if match and int(match.group()) <= 1:
-                        print("🚪 Only 1 participant left. Ending recording.")
+                        await snap("08_only_one_participant_left")
                         break
                 except Exception:
-                    print("⚠️ Could not find participants button, assuming meeting ended.")
+                    await snap("09_participants_button_not_found")
                     break
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
-            await page.screenshot(path=os.path.join(output_dir, "error.png"))
+            await snap("10_error_occurred")
         finally:
             if recorder and recorder.poll() is None:
                 recorder.terminate()
                 recorder.communicate()
             
-            # --- ROBUST LEAVE LOGIC ---
             try:
                 if frame:
-                    print("Attempting to leave meeting...")
-                    # Step 1: Click "Leave" inside the iframe
+                    await snap("11_attempting_to_leave")
                     leave_btn_text = re.compile("^Leave$|^Завершение$", re.I)
                     await frame.get_by_role("button", name=leave_btn_text).click(timeout=5000)
                     
-                    # Step 2: Wait and click "Leave Meeting" on the main page confirmation dialog
-                    await asyncio.sleep(1) # Give dialog time to appear
+                    await asyncio.sleep(1)
+                    await snap("12_leave_confirmation_dialog")
+                    
                     confirm_btn_text = re.compile("Leave Meeting|Выйти из конференции", re.I)
                     await page.get_by_role("button", name=confirm_btn_text).click(timeout=5000)
                     print("✅ Left meeting successfully.")
@@ -200,6 +205,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
     if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 4096:
         job_status[job_id] = {"status": "transcribing"}
+        # ... (rest of the transcription/summarization logic remains the same)
         if transcribe_audio(output_audio_path, output_transcript_path):
             job_status[job_id] = {"status": "summarizing"}
             summarizer = WorkflowAgentProcessor(base_url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
@@ -214,5 +220,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                  job_status[job_id] = {"status": "failed", "error": "File upload for summarization failed."}
         else:
             job_status[job_id] = {"status": "failed", "error": "Transcription failed"}
+
     else:
         job_status[job_id] = {"status": "failed", "error": "Audio recording was empty or failed"}
