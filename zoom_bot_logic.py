@@ -99,38 +99,47 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             job_status[job_id] = {"status": "failed", "error": f"Failed to launch browser: {e}"}
             return
 
+        screenshot_count = 0
+        async def snap(name: str):
+            nonlocal screenshot_count
+            screenshot_count += 1
+            path = os.path.join(output_dir, f"{screenshot_count:02d}_{name}.png")
+            try:
+                await page.screenshot(path=path)
+                print(f"📸 Saved screenshot: {path}")
+            except Exception as e:
+                print(f"⚠️ Could not save screenshot {path}: {e}")
+
         recorder = None
         frame = None
         try:
             job_status[job_id] = {"status": "navigating"}
             await page.goto("https://app.zoom.us/wc/join", timeout=60000)
+            await snap("01_navigated_to_join_page")
             
             meeting_id_placeholder = re.compile("Meeting ID|Идентификатор конференции", re.IGNORECASE)
             await page.get_by_placeholder(meeting_id_placeholder).fill(meeting_id)
             join_button_text = re.compile("Join|Подключиться", re.IGNORECASE)
             await page.get_by_role("button", name=join_button_text).click()
             
-            # --- DEBUGGING STEP: Save HTML to find the correct cookie selector ---
-            try:
-                accept_cookies_button = page.get_by_role("button", name="ACCEPT COOKIES")
-                await accept_cookies_button.click(timeout=15000)
-                print("✅ Accepted cookies.")
-            except TimeoutError:
-                print("‼️ Cookie consent dialog was not found. Saving page HTML for debugging.")
-                # Save the HTML content to a file for inspection
-                html_content = await page.content()
-                debug_path = os.path.join(output_dir, "debug_page_source.html")
-                with open(debug_path, "w", encoding="utf-8") as f:
-                    f.write(html_content)
-                print(f"📄 Saved page HTML to {debug_path}. Please inspect this file to find the correct selector for the cookie button.")
-                # Raise the exception to stop the bot, since it cannot proceed
-                raise
-
+            # Locate the iframe first
             frame = page.frame_locator('iframe').first
             await frame.locator('body').wait_for(timeout=30000)
-            
+            await snap("02_iframe_loaded")
+
+            # --- FINAL FIX: Handle Cookie Consent Dialog INSIDE THE IFRAME ---
+            try:
+                # The cookie button is inside the iframe, so we search within the 'frame' object.
+                accept_cookies_button = frame.get_by_role("button", name="ACCEPT COOKIES")
+                await accept_cookies_button.click(timeout=15000)
+                print("✅ Accepted cookies.")
+                await snap("03_cookies_accepted")
+            except TimeoutError:
+                print("ℹ️ Cookie consent dialog did not appear in the iframe.")
+
             await frame.get_by_role("button", name=re.compile("Mute|Выключить звук", re.I)).click(timeout=10000)
             await frame.get_by_role("button", name=re.compile("Stop Video|Остановить видео", re.I)).click(timeout=10000)
+            await snap("04_mic_and_video_off")
 
             await frame.locator('input[type="password"], input[type="text"]').first.focus()
             await page.keyboard.type(pwd)
@@ -139,8 +148,10 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await page.keyboard.press("Tab")
             await page.keyboard.press("Tab")
             await page.keyboard.press("Enter")
+            await snap("05_form_submitted")
 
             await frame.get_by_role("button", name=re.compile("Leave|Завершение", re.I)).wait_for(state="visible", timeout=60000)
+            await snap("06_in_meeting")
             
             job_status[job_id] = {"status": "recording"}
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -158,6 +169,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 }
             }""")
             print("🔊 Ensured browser audio is unmuted.")
+            await snap("07_audio_unmuted")
 
             while True:
                 await asyncio.sleep(5)
@@ -169,12 +181,14 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     count_text = await participants_button.get_attribute("aria-label") or ""
                     match = re.search(r'\d+', count_text)
                     if match and int(match.group()) <= 1:
+                        await snap("08_only_one_participant_left")
                         break
                 except Exception:
+                    await snap("09_participants_button_not_found")
                     break
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
-            await page.screenshot(path=os.path.join(output_dir, "error.png")) # Keep one error screenshot
+            await snap("10_error_occurred")
         finally:
             if recorder and recorder.poll() is None:
                 recorder.terminate()
@@ -182,8 +196,10 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             try:
                 if frame:
+                    await snap("11_attempting_to_leave")
                     leave_btn_text = re.compile("^Leave$|^Завершение$", re.I)
                     await frame.get_by_role("button", name=leave_btn_text).click(timeout=5000)
+                    await snap("12_leave_button_clicked")
                     
                     try:
                         confirm_btn_text = re.compile("Leave Meeting|Выйти из конференции", re.I)
