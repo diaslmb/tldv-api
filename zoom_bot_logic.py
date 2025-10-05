@@ -75,104 +75,259 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         recorder = None
         try:
             job_status[job_id] = {"status": "navigating"}
-            await page.goto(meeting_url, timeout=60000)
-
-            # Wait for the page to load
-            await asyncio.sleep(3)
-            await page.screenshot(path=os.path.join(output_dir, "1_initial_page.png"))
-
-            # Handle "Open Zoom Meetings?" dialog - click "Cancel" to use web client
+            print(f"🌐 Navigating to: {meeting_url}")
+            
+            # Use domcontentloaded instead of load for faster navigation
             try:
-                cancel_button = page.get_by_role("button", name=re.compile("Cancel|Launch Meeting", re.IGNORECASE))
-                if await cancel_button.is_visible(timeout=5000):
-                    await cancel_button.click()
-                    print("✅ Dismissed app launch dialog")
+                await page.goto(meeting_url, wait_until="domcontentloaded", timeout=90000)
+                print("✅ Page loaded (domcontentloaded)")
+            except TimeoutError:
+                print("⚠️ Page load timeout, but continuing...")
+                # Take screenshot to see what's on the page
+                await page.screenshot(path=os.path.join(output_dir, "0_timeout_state.png"))
+
+            # Wait for page to settle
+            await asyncio.sleep(5)
+            await page.screenshot(path=os.path.join(output_dir, "1_initial_page.png"))
+            print(f"📸 Screenshot saved: 1_initial_page.png")
+
+            # Debug: Print page title and URL
+            page_title = await page.title()
+            current_url = page.url
+            print(f"📄 Page title: {page_title}")
+            print(f"🔗 Current URL: {current_url}")
+
+            # Handle multiple possible Zoom scenarios
+            
+            # Scenario 1: "Open Zoom Meetings?" dialog
+            try:
+                print("🔍 Checking for app launch dialog...")
+                launch_dialog = page.locator('text="Open Zoom Meetings?"')
+                if await launch_dialog.is_visible(timeout=5000):
+                    print("Found 'Open Zoom Meetings?' dialog")
+                    # Click "Cancel" or "Join from Your Browser"
+                    cancel_btn = page.get_by_role("button", name=re.compile("Cancel", re.IGNORECASE))
+                    await cancel_btn.click(timeout=3000)
+                    print("✅ Clicked Cancel on app launch dialog")
                     await asyncio.sleep(2)
             except TimeoutError:
-                print("No app launch dialog found")
+                print("No app launch dialog found (timeout)")
+            except Exception as e:
+                print(f"App launch dialog handling: {e}")
 
-            # Click "Join from Your Browser" if it appears
+            # Scenario 2: "Join from Your Browser" link
             try:
-                join_browser_link = page.get_by_role("link", name=re.compile("Join from your browser|join from browser", re.IGNORECASE))
-                if await join_browser_link.is_visible(timeout=5000):
-                    await join_browser_link.click()
-                    print("✅ Clicked 'Join from Your Browser'")
-                    await asyncio.sleep(3)
-            except TimeoutError:
-                print("No 'Join from browser' link found")
+                print("🔍 Looking for 'Join from Your Browser' link...")
+                await page.screenshot(path=os.path.join(output_dir, "1b_before_browser_join.png"))
+                
+                # Try multiple selectors
+                browser_join_selectors = [
+                    'a:has-text("Join from your browser")',
+                    'a:has-text("join from browser")',
+                    'text="Join from Your Browser"',
+                    '[href*="wc/join"]'
+                ]
+                
+                clicked = False
+                for selector in browser_join_selectors:
+                    try:
+                        join_link = page.locator(selector).first
+                        if await join_link.is_visible(timeout=3000):
+                            await join_link.click()
+                            print(f"✅ Clicked browser join link (selector: {selector})")
+                            clicked = True
+                            await asyncio.sleep(5)
+                            break
+                    except:
+                        continue
+                
+                if not clicked:
+                    print("⚠️ Could not find 'Join from Your Browser' link, checking if already on join page...")
+                    
+            except Exception as e:
+                print(f"Browser join link handling: {e}")
+
+            await page.screenshot(path=os.path.join(output_dir, "2_after_navigation.png"))
+
+            # Scenario 3: Check if we're on the join page
+            try:
+                print("🔍 Checking for join page elements...")
+                page_content = await page.content()
+                
+                # Save HTML for debugging
+                with open(os.path.join(output_dir, "page_content.html"), "w", encoding="utf-8") as f:
+                    f.write(page_content)
+                print("📝 Saved page HTML for debugging")
+                
+            except Exception as e:
+                print(f"Debug content save failed: {e}")
 
             # Fill in the name
             try:
-                name_input = page.locator('input[type="text"]').first
-                await name_input.wait_for(state="visible", timeout=15000)
-                await name_input.fill("SHAI AI Notetaker")
-                print("✅ Filled in name")
-            except TimeoutError:
-                print("⚠️ Could not find name input field")
-
-            await page.screenshot(path=os.path.join(output_dir, "2_pre_join_screen.png"))
-
-            # Turn off video and audio before joining
-            try:
-                print("🎤 Turning off microphone and camera...")
+                print("🔍 Looking for name input field...")
+                # Try multiple possible selectors for name input
+                name_input = None
+                name_selectors = [
+                    'input[type="text"]',
+                    'input[placeholder*="name" i]',
+                    'input#inputname',
+                    'input[aria-label*="name" i]'
+                ]
                 
-                # Uncheck "Join with Computer Audio" checkbox if present
-                try:
-                    audio_checkbox = page.locator('input[type="checkbox"]').first
-                    if await audio_checkbox.is_checked():
-                        await audio_checkbox.uncheck()
-                        print("✅ Unchecked audio checkbox")
-                except Exception as e:
-                    print(f"Audio checkbox handling: {e}")
+                for selector in name_selectors:
+                    try:
+                        input_field = page.locator(selector).first
+                        if await input_field.is_visible(timeout=5000):
+                            name_input = input_field
+                            print(f"✅ Found name input with selector: {selector}")
+                            break
+                    except:
+                        continue
+                
+                if name_input:
+                    await name_input.fill("SHAI AI Notetaker")
+                    print("✅ Filled in name")
+                else:
+                    print("⚠️ Could not find name input field")
+                    
+            except Exception as e:
+                print(f"Name input error: {e}")
 
-                # Turn off microphone using button
-                try:
-                    mic_button = page.get_by_role("button", name=re.compile("mute|microphone", re.IGNORECASE)).first
-                    await mic_button.click(timeout=3000)
-                    print("✅ Clicked microphone button")
-                except Exception as e:
-                    print(f"Mic button click failed: {e}")
+            await page.screenshot(path=os.path.join(output_dir, "3_pre_join_screen.png"))
 
-                # Turn off video using button
+            # Turn off audio/video
+            try:
+                print("🎤 Attempting to turn off microphone and camera...")
+                
+                # Turn off audio checkbox if present
                 try:
-                    video_button = page.get_by_role("button", name=re.compile("video|camera", re.IGNORECASE)).first
-                    await video_button.click(timeout=3000)
-                    print("✅ Clicked video button")
+                    audio_checkbox = page.locator('input[type="checkbox"][id*="audio"]').first
+                    if await audio_checkbox.is_visible(timeout=3000):
+                        is_checked = await audio_checkbox.is_checked()
+                        if is_checked:
+                            await audio_checkbox.click()
+                            print("✅ Unchecked audio checkbox")
                 except Exception as e:
-                    print(f"Video button click failed: {e}")
+                    print(f"Audio checkbox: {e}")
+
+                # Click mute button
+                try:
+                    # Zoom uses specific aria-labels
+                    mute_selectors = [
+                        'button[aria-label*="Mute" i]',
+                        'button[aria-label*="mute my microphone" i]',
+                        'button:has-text("Mute")'
+                    ]
+                    
+                    for selector in mute_selectors:
+                        try:
+                            mute_btn = page.locator(selector).first
+                            if await mute_btn.is_visible(timeout=2000):
+                                await mute_btn.click()
+                                print(f"✅ Clicked mute button ({selector})")
+                                break
+                        except:
+                            continue
+                            
+                except Exception as e:
+                    print(f"Mute button: {e}")
+
+                # Turn off video
+                try:
+                    video_selectors = [
+                        'button[aria-label*="video" i]',
+                        'button[aria-label*="camera" i]',
+                        'button:has-text("Stop Video")'
+                    ]
+                    
+                    for selector in video_selectors:
+                        try:
+                            video_btn = page.locator(selector).first
+                            if await video_btn.is_visible(timeout=2000):
+                                await video_btn.click()
+                                print(f"✅ Clicked video button ({selector})")
+                                break
+                        except:
+                            continue
+                            
+                except Exception as e:
+                    print(f"Video button: {e}")
 
                 await asyncio.sleep(1)
-                await page.screenshot(path=os.path.join(output_dir, "3_after_mute.png"))
+                await page.screenshot(path=os.path.join(output_dir, "4_after_mute.png"))
 
             except Exception as e:
-                print(f"⚠️ Error toggling audio/video: {e}")
+                print(f"Audio/video toggle error: {e}")
 
-            # Click "Join" button
+            # Click Join button
             try:
-                join_button = page.get_by_role("button", name=re.compile("^Join$|Join Meeting", re.IGNORECASE))
-                await join_button.wait_for(state="visible", timeout=15000)
+                print("🔍 Looking for Join button...")
+                join_selectors = [
+                    'button:has-text("Join")',
+                    'button[aria-label*="Join" i]',
+                    'button#joinBtn',
+                    'input[type="submit"][value="Join"]'
+                ]
+                
+                join_button = None
+                for selector in join_selectors:
+                    try:
+                        btn = page.locator(selector).first
+                        if await btn.is_visible(timeout=5000):
+                            join_button = btn
+                            print(f"✅ Found Join button ({selector})")
+                            break
+                    except:
+                        continue
+                
+                if not join_button:
+                    job_status[job_id] = {"status": "failed", "error": "Could not find Join button"}
+                    await page.screenshot(path=os.path.join(output_dir, "error_no_join_button.png"))
+                    return
                 
                 job_status[job_id] = {"status": "recording"}
                 recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
                 await join_button.click()
                 print("✅ Clicked Join button")
-            except TimeoutError:
-                job_status[job_id] = {"status": "failed", "error": "Could not find Join button"}
+                
+            except Exception as e:
+                job_status[job_id] = {"status": "failed", "error": f"Join button error: {e}"}
                 return
 
-            # Wait for meeting to fully load
-            await asyncio.sleep(8)
+            # Wait for meeting to load
+            print("⏳ Waiting for meeting to load...")
+            await asyncio.sleep(10)
             
-            # Wait for participants panel or meeting controls to appear
+            await page.screenshot(path=os.path.join(output_dir, "5_in_meeting.png"))
+            
+            # Verify we're in the meeting
             try:
-                # Look for participants button or leave button to confirm we're in the meeting
-                await page.get_by_role("button", name=re.compile("Participants|Leave", re.IGNORECASE)).first.wait_for(state="visible", timeout=30000)
-                print("✅ Bot has successfully joined the meeting")
-            except TimeoutError:
-                print("⚠️ Could not confirm meeting join, but continuing...")
-
-            await page.screenshot(path=os.path.join(output_dir, "4_in_meeting.png"))
+                # Look for meeting controls
+                controls_found = False
+                control_selectors = [
+                    'button[aria-label*="Participants" i]',
+                    'button[aria-label*="Leave" i]',
+                    'button:has-text("Participants")',
+                    'button:has-text("Leave")'
+                ]
+                
+                for selector in control_selectors:
+                    try:
+                        if await page.locator(selector).first.is_visible(timeout=5000):
+                            controls_found = True
+                            print(f"✅ Found meeting control: {selector}")
+                            break
+                    except:
+                        continue
+                
+                if controls_found:
+                    print("✅ Bot has successfully joined the meeting")
+                else:
+                    print("⚠️ Could not confirm meeting join, but continuing...")
+                    
+            except Exception as e:
+                print(f"Meeting verification: {e}")
 
             # Main monitoring loop
             while True:
@@ -187,48 +342,54 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     participant_count = 2  # Safe default
 
                     try:
-                        # Find and click the Participants button
-                        participants_button = page.get_by_role("button", name=re.compile("Participants", re.IGNORECASE)).first
+                        # Find Participants button
+                        participants_button = None
+                        participant_selectors = [
+                            'button[aria-label*="Participants" i]',
+                            'button:has-text("Participants")',
+                            'button[aria-label*="manage participants" i]'
+                        ]
                         
-                        if await participants_button.is_visible(timeout=3000):
-                            # Check if panel is already open by looking for the panel
-                            panel_open = await page.locator('[class*="participants"]').first.is_visible()
-                            
-                            if not panel_open:
-                                await participants_button.click()
-                                await asyncio.sleep(2)
-                                print("Opened participants panel")
-                            
-                            await page.screenshot(path=os.path.join(output_dir, f"participants_{int(asyncio.get_event_loop().time())}.png"))
-                            
-                            # Try to get participant count from the button text
+                        for selector in participant_selectors:
+                            try:
+                                btn = page.locator(selector).first
+                                if await btn.is_visible(timeout=3000):
+                                    participants_button = btn
+                                    break
+                            except:
+                                continue
+                        
+                        if participants_button:
+                            # Try to get count from button text
                             try:
                                 button_text = await participants_button.inner_text()
-                                # Look for pattern like "Participants (3)" or just a number
                                 match = re.search(r'\((\d+)\)|\b(\d+)\b', button_text)
                                 if match:
                                     count_str = match.group(1) or match.group(2)
                                     participant_count = int(count_str)
-                                    print(f"👥 Found {participant_count} participant(s) from button text")
-                            except Exception as e:
-                                print(f"Could not parse button text: {e}")
+                                    print(f"👥 Found {participant_count} participant(s)")
+                            except:
+                                pass
                             
-                            # Alternative: Count participant items in the panel
-                            if participant_count == 2:  # Still default
+                            # If still default, open panel and count
+                            if participant_count == 2:
                                 try:
-                                    # Look for participant list items
-                                    participant_items = page.locator('[class*="participants-item"], [class*="participant-item"]')
+                                    await participants_button.click()
+                                    await asyncio.sleep(2)
+                                    await page.screenshot(path=os.path.join(output_dir, f"participants_{int(asyncio.get_event_loop().time())}.png"))
+                                    
+                                    # Count items in participants list
+                                    participant_items = page.locator('[class*="participants-item"], [class*="participant-list-item"]')
                                     count = await participant_items.count()
                                     if count > 0:
                                         participant_count = count
-                                        print(f"👥 Counted {participant_count} participant items in panel")
-                                except Exception as e:
-                                    print(f"Could not count participant items: {e}")
-                            
-                            # Close panel if we opened it
-                            if not panel_open and await participants_button.is_visible():
-                                await participants_button.click()
-                                await asyncio.sleep(1)
+                                        print(f"👥 Counted {participant_count} participant items")
+                                    
+                                    # Close panel
+                                    await participants_button.click()
+                                    await asyncio.sleep(1)
+                                except:
+                                    pass
                         else:
                             print("⚠️ Participants button not visible")
                             
@@ -237,7 +398,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
                     # Exit if only bot remains
                     if participant_count <= 1:
-                        print(f"🚪 Only {participant_count} participant(s) remaining. Bot is alone. Leaving meeting.")
+                        print(f"🚪 Only {participant_count} participant(s) remaining. Leaving meeting.")
                         break
                     else:
                         print(f"✅ {participant_count} participants in meeting. Monitoring...")
@@ -249,6 +410,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"An error occurred: {e}"}
             await page.screenshot(path=os.path.join(output_dir, "error.png"))
+            print(f"❌ Fatal error: {e}")
         finally:
             if recorder and recorder.poll() is None:
                 recorder.terminate()
@@ -256,20 +418,42 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
             try:
                 # Click Leave button
-                leave_button = page.get_by_role("button", name=re.compile("Leave|End", re.IGNORECASE)).first
-                await leave_button.click(timeout=5000)
-                await asyncio.sleep(1)
+                leave_selectors = [
+                    'button[aria-label*="Leave" i]',
+                    'button:has-text("Leave")',
+                    'button:has-text("End")'
+                ]
                 
-                # Confirm leave if needed
-                try:
-                    confirm_leave = page.get_by_role("button", name=re.compile("Leave Meeting|Yes", re.IGNORECASE))
-                    await confirm_leave.click(timeout=3000)
-                except:
-                    pass
-                    
-                await asyncio.sleep(2)
-            except Exception:
-                pass
+                for selector in leave_selectors:
+                    try:
+                        leave_btn = page.locator(selector).first
+                        if await leave_btn.is_visible(timeout=3000):
+                            await leave_btn.click()
+                            print("✅ Clicked Leave button")
+                            await asyncio.sleep(2)
+                            
+                            # Confirm if needed
+                            confirm_selectors = [
+                                'button:has-text("Leave Meeting")',
+                                'button:has-text("Yes")',
+                                'button:has-text("Leave")'
+                            ]
+                            
+                            for confirm_sel in confirm_selectors:
+                                try:
+                                    confirm_btn = page.locator(confirm_sel).first
+                                    if await confirm_btn.is_visible(timeout=2000):
+                                        await confirm_btn.click()
+                                        print("✅ Confirmed leave")
+                                        break
+                                except:
+                                    continue
+                            break
+                    except:
+                        continue
+                        
+            except Exception as e:
+                print(f"Leave button error: {e}")
 
             await browser.close()
 
