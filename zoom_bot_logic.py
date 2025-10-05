@@ -122,12 +122,10 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             join_button_text = re.compile("Join|Подключиться", re.IGNORECASE)
             await page.get_by_role("button", name=join_button_text).click()
             
-            # Locate the iframe first
             frame = page.frame_locator('iframe').first
             await frame.locator('body').wait_for(timeout=30000)
             await snap("02_iframe_loaded")
-
-            # Handle Cookie Consent Dialog INSIDE THE IFRAME
+            
             try:
                 accept_cookies_button = frame.get_by_role("button", name="ACCEPT COOKIES")
                 await accept_cookies_button.click(timeout=15000)
@@ -136,7 +134,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             except TimeoutError:
                 print("ℹ️ Cookie consent dialog did not appear in the iframe.")
             
-            # --- FINAL FIX: Handle "I Agree" for Terms of Service ---
             try:
                 i_agree_button = frame.get_by_role("button", name="I Agree")
                 await i_agree_button.click(timeout=15000)
@@ -215,6 +212,10 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         print("✅ Confirmed leaving meeting.")
                     except TimeoutError:
                         print("ℹ️ No leave confirmation dialog appeared, or it was not needed.")
+                    
+                    # --- FINAL FIX: Add a small delay to ensure the leave command is processed ---
+                    await asyncio.sleep(3)
+
             except Exception as e:
                 print(f"Could not click leave button: {e}")
             await browser.close()
