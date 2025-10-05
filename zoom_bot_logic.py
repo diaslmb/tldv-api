@@ -103,32 +103,29 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 print("✅ Handled second permission pop-up.")
             except TimeoutError:
                 print("ℹ️ Permission pop-ups did not appear, proceeding.")
-
-            # *** FIX: Switch to the iframe containing the form ***
-            # We locate the iframe; all subsequent searches will be within this frame.
-            frame = page.frame_locator("iframe").first
-            print("✅ Located form iframe.")
-
-            passcode_placeholder = re.compile("Meeting Passcode|Код доступа конференции", re.IGNORECASE)
-            await frame.get_by_placeholder(passcode_placeholder).wait_for(state="visible", timeout=30000)
             
-            try:
-                await frame.get_by_role("button", name="Mute").click(timeout=5000)
-                print("✅ Microphone muted.")
-                await frame.get_by_role("button", name="Stop Video").click(timeout=5000)
-                print("✅ Video stopped.")
-            except Exception as e:
-                print(f"⚠️ Could not mute or stop video: {e}")
+            # *** FINAL FIX: Use keyboard to fill the form ***
+            # Wait for any input field to be ready to ensure the form is loaded
+            await page.wait_for_selector('input', timeout=30000)
+            print("✅ Form is ready.")
 
-            await frame.get_by_placeholder(passcode_placeholder).fill(pwd)
-            name_placeholder = re.compile("Your Name|Ваше имя", re.IGNORECASE)
-            await frame.get_by_placeholder(name_placeholder).fill("SHAI AI Notetaker")
-            print("✅ Entered passcode and name.")
+            # Type passcode into the first field (which will be focused by default)
+            await page.keyboard.type(pwd)
+            print("✅ Typed passcode.")
 
-            final_join_button_text = re.compile(r"^Join$|^Войти$", re.IGNORECASE)
-            await frame.get_by_role("button", name=final_join_button_text).click()
-            print("✅ Clicked final Join button.")
+            # Tab to the next field (Name) and type
+            await page.keyboard.press("Tab")
+            await page.keyboard.type("SHAI AI Notetaker")
+            print("✅ Typed name.")
+
+            # Tab twice to skip "Remember Me" and focus the Join button
+            await page.keyboard.press("Tab")
+            await page.keyboard.press("Tab")
             
+            # "Click" the focused Join button by pressing Enter
+            await page.keyboard.press("Enter")
+            print("✅ Clicked final Join button via keyboard.")
+
             await page.get_by_role("button", name=re.compile("Leave", re.I)).wait_for(state="visible", timeout=60000)
             
             job_status[job_id] = {"status": "recording"}
