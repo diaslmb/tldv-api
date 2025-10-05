@@ -94,38 +94,39 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await page.get_by_role("button", name=join_button_text).click()
             print(f"✅ Entered Meeting ID: {meeting_id}")
 
-            # *** FIX: Handle popups as optional ***
             try:
                 popup1_text = re.compile("Continue without microphone and camera|Продолжить без микрофона и камеры", re.IGNORECASE)
-                await page.get_by_role("button", name=popup1_text).click(timeout=10000) # Shorter timeout
+                await page.get_by_role("button", name=popup1_text).click(timeout=10000)
                 print("✅ Handled first permission pop-up.")
-
                 popup2_text = re.compile("Continue without microphone|Продолжить без микрофона", re.IGNORECASE)
                 await page.get_by_role("button", name=popup2_text).click(timeout=10000)
                 print("✅ Handled second permission pop-up.")
             except TimeoutError:
                 print("ℹ️ Permission pop-ups did not appear, proceeding.")
 
-            # *** FIX: Mute audio and stop video on the final join screen ***
+            # *** FIX: Switch to the iframe containing the form ***
+            # We locate the iframe; all subsequent searches will be within this frame.
+            frame = page.frame_locator("iframe").first
+            print("✅ Located form iframe.")
+
             passcode_placeholder = re.compile("Meeting Passcode|Код доступа конференции", re.IGNORECASE)
-            await page.get_by_placeholder(passcode_placeholder).wait_for(state="visible", timeout=30000)
+            await frame.get_by_placeholder(passcode_placeholder).wait_for(state="visible", timeout=30000)
             
             try:
-                await page.get_by_role("button", name="Mute").click(timeout=5000)
+                await frame.get_by_role("button", name="Mute").click(timeout=5000)
                 print("✅ Microphone muted.")
-                await page.get_by_role("button", name="Stop Video").click(timeout=5000)
+                await frame.get_by_role("button", name="Stop Video").click(timeout=5000)
                 print("✅ Video stopped.")
             except Exception as e:
                 print(f"⚠️ Could not mute or stop video: {e}")
 
-            # Enter passcode and name
-            await page.get_by_placeholder(passcode_placeholder).fill(pwd)
+            await frame.get_by_placeholder(passcode_placeholder).fill(pwd)
             name_placeholder = re.compile("Your Name|Ваше имя", re.IGNORECASE)
-            await page.get_by_placeholder(name_placeholder).fill("SHAI AI Notetaker")
+            await frame.get_by_placeholder(name_placeholder).fill("SHAI AI Notetaker")
             print("✅ Entered passcode and name.")
 
             final_join_button_text = re.compile(r"^Join$|^Войти$", re.IGNORECASE)
-            await page.get_by_role("button", name=final_join_button_text).click()
+            await frame.get_by_role("button", name=final_join_button_text).click()
             print("✅ Clicked final Join button.")
             
             await page.get_by_role("button", name=re.compile("Leave", re.I)).wait_for(state="visible", timeout=60000)
@@ -138,11 +139,9 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
             while True:
                 await asyncio.sleep(5)
-
                 if job_status.get(job_id, {}).get("status") == "stopping":
                     print("Stop signal received, leaving meeting.")
                     break
-
                 try:
                     participants_button = page.get_by_role("button", name=re.compile("Participants", re.I))
                     participant_count_text = await participants_button.inner_text()
@@ -172,7 +171,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     pass
             except Exception as e:
                 print(f"Could not click leave button: {e}")
-
             await browser.close()
 
     if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 1024:
@@ -182,7 +180,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         if transcription_success:
             job_status[job_id] = {"status": "summarizing"}
             summarizer = WorkflowAgentProcessor(base_url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
-
             file_id = await summarizer.upload_file(output_transcript_path)
             if file_id:
                 summary_pdf_path = os.path.join(output_dir, "summary.pdf")
