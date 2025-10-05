@@ -72,27 +72,34 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         recorder = None
         try:
             job_status[job_id] = {"status": "navigating"}
-            await page.goto(meeting_url, timeout=90000)
+            # Navigate but don't wait for full load, which causes the timeout
+            await page.goto(meeting_url, timeout=90000, wait_until="domcontentloaded")
+            await page.screenshot(path=os.path.join(output_dir, "01_initial_page.png"))
 
-            # *** FIX: Handle the interstitial page by clicking "Join from Browser" ***
-            try:
-                join_from_browser_button = page.get_by_role("link", name=re.compile("Join from your browser", re.I))
-                await join_from_browser_button.wait_for(state="visible", timeout=15000)
-                await join_from_browser_button.click()
-            except TimeoutError:
-                print("⚠️ 'Join from browser' button not found, proceeding directly.")
-                pass 
-
-            # Handle cookie consent if it appears
+            # Aggressively try to close cookie banner first
             try:
                 await page.get_by_role("button", name="Cookies Settings").click(timeout=5000)
+                print("✅ Handled cookie banner.")
+                await page.screenshot(path=os.path.join(output_dir, "02_after_cookie.png"))
             except TimeoutError:
-                pass
+                print("ℹ️ Cookie banner not found, skipping.")
 
-            # Fill name and mute before joining
+            # *** NEW ROBUST LOGIC: Find and click the web client link ***
+            try:
+                # This selector targets the link even if it's inside other elements
+                web_client_link = page.locator('a:has-text("Join from your browser")')
+                await web_client_link.wait_for(state="visible", timeout=20000)
+                await web_client_link.click()
+                print("✅ Clicked 'Join from your browser'.")
+                await page.screenshot(path=os.path.join(output_dir, "03_clicked_join_from_browser.png"))
+            except TimeoutError:
+                print("⚠️ Could not find 'Join from your browser' link. The page may have loaded directly.")
+
+            # Now, wait for the name input on the pre-join screen
             name_input = page.get_by_placeholder("Your Name")
             await name_input.wait_for(state="visible", timeout=30000)
             await name_input.fill("SHAI AI Notetaker")
+            await page.screenshot(path=os.path.join(output_dir, "04_name_filled.png"))
             
             # Mute microphone on pre-join screen
             await page.get_by_role("button", name="Mute").click(timeout=5000)
@@ -117,12 +124,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     break
 
                 try:
-                    # Click the participants button to open the list
                     participants_button = page.get_by_role("button", name=re.compile("Participants", re.I))
-                    await participants_button.click()
-                    await asyncio.sleep(1)
-
-                    # Count the number of participants
                     participant_count_text = await participants_button.inner_text()
                     match = re.search(r'\d+', participant_count_text)
                     if match:
@@ -131,10 +133,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         if count <= 1:
                             print("🚪 Only 1 participant left. Ending recording.")
                             break
-                    
-                    # Close the participants pane
-                    await participants_button.click()
-
                 except Exception as e:
                     print(f"⚠️ Could not check participant count, assuming meeting is ongoing. Error: {e}")
 
