@@ -99,7 +99,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             job_status[job_id] = {"status": "failed", "error": f"Failed to launch browser: {e}"}
             return
 
-        # --- Screenshot Helper ---
         screenshot_count = 0
         async def snap(name: str):
             nonlocal screenshot_count
@@ -116,20 +115,31 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         try:
             job_status[job_id] = {"status": "navigating"}
             await page.goto("https://app.zoom.us/wc/join", timeout=60000)
-            await snap("01_ navigated_to_join_page")
+            await snap("01_navigated_to_join_page")
             
             meeting_id_placeholder = re.compile("Meeting ID|Идентификатор конференции", re.IGNORECASE)
             await page.get_by_placeholder(meeting_id_placeholder).fill(meeting_id)
             join_button_text = re.compile("Join|Подключиться", re.IGNORECASE)
             await page.get_by_role("button", name=join_button_text).click()
             
+            # --- FIX: Handle Cookie Consent Dialog ---
+            try:
+                # This button appears on the main page, not in the iframe.
+                accept_cookies_button = page.get_by_role("button", name="Accept Cookies")
+                await accept_cookies_button.wait_for(state="visible", timeout=10000)
+                await accept_cookies_button.click()
+                print("✅ Accepted cookies.")
+                await snap("02_cookies_accepted")
+            except TimeoutError:
+                print("ℹ️ Cookie consent dialog did not appear.")
+
             frame = page.frame_locator('iframe').first
             await frame.locator('body').wait_for(timeout=30000)
-            await snap("02_pre_join_iframe_ready")
+            await snap("03_pre_join_iframe_ready")
             
             await frame.get_by_role("button", name=re.compile("Mute|Выключить звук", re.I)).click(timeout=10000)
             await frame.get_by_role("button", name=re.compile("Stop Video|Остановить видео", re.I)).click(timeout=10000)
-            await snap("03_mic_and_video_off")
+            await snap("04_mic_and_video_off")
 
             await frame.locator('input[type="password"], input[type="text"]').first.focus()
             await page.keyboard.type(pwd)
@@ -138,10 +148,10 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await page.keyboard.press("Tab")
             await page.keyboard.press("Tab")
             await page.keyboard.press("Enter")
-            await snap("04_form_submitted")
+            await snap("05_form_submitted")
 
             await frame.get_by_role("button", name=re.compile("Leave|Завершение", re.I)).wait_for(state="visible", timeout=60000)
-            await snap("05_in_meeting")
+            await snap("06_in_meeting")
             
             job_status[job_id] = {"status": "recording"}
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -151,18 +161,15 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 raise Exception(f"ffmpeg failed to start: {stderr.decode()}")
             print("✅ Audio recording started.")
             
-            try:
-                join_audio_btn = frame.get_by_role("button", name=re.compile("Join Audio by Computer|Подключить звук", re.I))
-                await join_audio_btn.click(timeout=15000)
-                await snap("06_joined_computer_audio")
-                await asyncio.sleep(2)
-
-                unmute_btn = frame.get_by_role("button", name=re.compile("Unmute|Включить звук", re.I))
-                if not await unmute_btn.is_visible(timeout=5000):
-                    await frame.get_by_role("button", name=re.compile("Mute|Выключить звук", re.I)).click()
-                    await snap("07_mic_re-muted")
-            except Exception:
-                await snap("06_join_audio_prompt_not_found")
+            await page.evaluate("""() => {
+                const mediaElements = document.querySelectorAll('video, audio');
+                for (const el of mediaElements) {
+                    el.muted = false;
+                    el.volume = 1.0;
+                }
+            }""")
+            print("🔊 Ensured browser audio is unmuted.")
+            await snap("07_audio_unmuted")
 
             while True:
                 await asyncio.sleep(5)
@@ -192,13 +199,14 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     await snap("11_attempting_to_leave")
                     leave_btn_text = re.compile("^Leave$|^Завершение$", re.I)
                     await frame.get_by_role("button", name=leave_btn_text).click(timeout=5000)
+                    await snap("12_leave_button_clicked")
                     
-                    await asyncio.sleep(1)
-                    await snap("12_leave_confirmation_dialog")
-                    
-                    confirm_btn_text = re.compile("Leave Meeting|Выйти из конференции", re.I)
-                    await page.get_by_role("button", name=confirm_btn_text).click(timeout=5000)
-                    print("✅ Left meeting successfully.")
+                    try:
+                        confirm_btn_text = re.compile("Leave Meeting|Выйти из конференции", re.I)
+                        await page.get_by_role("button", name=confirm_btn_text).click(timeout=3000)
+                        print("✅ Confirmed leaving meeting.")
+                    except TimeoutError:
+                        print("ℹ️ No leave confirmation dialog appeared, or it was not needed.")
             except Exception as e:
                 print(f"Could not click leave button: {e}")
             await browser.close()
