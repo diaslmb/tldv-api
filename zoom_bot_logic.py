@@ -15,6 +15,15 @@ def get_ffmpeg_command(platform, duration, output_path):
         return ["ffmpeg", "-y", "-f", "pulse", "-i", "default", "-t", str(duration), output_path]
     return None
 
+def extract_meeting_details(url: str):
+    """Extracts meeting ID and password from a Zoom URL."""
+    # Pattern for /j/ links
+    match = re.search(r'/j/(\d+)\?pwd=([\w.-]+)', url)
+    if match:
+        return match.group(1), match.group(2)
+    # Add other URL patterns if needed
+    return None, None
+
 def transcribe_audio(audio_path, transcript_path):
     if not os.path.exists(audio_path):
         print(f"❌ Audio file not found at {audio_path}")
@@ -55,6 +64,11 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         job_status[job_id] = {"status": "failed", "error": "Unsupported OS"}
         return
 
+    meeting_id, pwd = extract_meeting_details(meeting_url)
+    if not meeting_id or not pwd:
+        job_status[job_id] = {"status": "failed", "error": "Could not extract Meeting ID and/or Password from URL."}
+        return
+
     job_status[job_id] = {"status": "starting_browser"}
     async with async_playwright() as p:
         try:
@@ -72,40 +86,31 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         recorder = None
         try:
             job_status[job_id] = {"status": "navigating"}
-            # Navigate but don't wait for full load, which causes the timeout
-            await page.goto(meeting_url, timeout=90000, wait_until="domcontentloaded")
-            await page.screenshot(path=os.path.join(output_dir, "01_initial_page.png"))
+            # 1. Navigate to the generic join page
+            await page.goto("https://app.zoom.us/wc/join", timeout=60000)
+            print("✅ Navigated to join page.")
 
-            # Aggressively try to close cookie banner first
-            try:
-                await page.get_by_role("button", name="Cookies Settings").click(timeout=5000)
-                print("✅ Handled cookie banner.")
-                await page.screenshot(path=os.path.join(output_dir, "02_after_cookie.png"))
-            except TimeoutError:
-                print("ℹ️ Cookie banner not found, skipping.")
+            # 2. Enter Meeting ID
+            await page.get_by_placeholder("Идентификатор конференции").fill(meeting_id)
+            await page.get_by_role("button", name="Подключиться").click()
+            print(f"✅ Entered Meeting ID: {meeting_id}")
 
-            # *** NEW ROBUST LOGIC: Find and click the web client link ***
-            try:
-                # This selector targets the link even if it's inside other elements
-                web_client_link = page.locator('a:has-text("Join from your browser")')
-                await web_client_link.wait_for(state="visible", timeout=20000)
-                await web_client_link.click()
-                print("✅ Clicked 'Join from your browser'.")
-                await page.screenshot(path=os.path.join(output_dir, "03_clicked_join_from_browser.png"))
-            except TimeoutError:
-                print("⚠️ Could not find 'Join from your browser' link. The page may have loaded directly.")
+            # 3. Handle the two popups
+            # First popup: "Продолжить без микрофона и камеры"
+            await page.get_by_role("button", name="Продолжить без микрофона и камеры").click(timeout=15000)
+            print("✅ Handled first permission pop-up.")
+            # Second popup: "Продолжить без микрофона"
+            await page.get_by_role("button", name="Продолжить без микрофона").click(timeout=15000)
+            print("✅ Handled second permission pop-up.")
 
-            # Now, wait for the name input on the pre-join screen
-            name_input = page.get_by_placeholder("Your Name")
-            await name_input.wait_for(state="visible", timeout=30000)
-            await name_input.fill("SHAI AI Notetaker")
-            await page.screenshot(path=os.path.join(output_dir, "04_name_filled.png"))
-            
-            # Mute microphone on pre-join screen
-            await page.get_by_role("button", name="Mute").click(timeout=5000)
-            
-            # Join the meeting
-            await page.get_by_role("button", name=re.compile(r"^Join$", re.I)).click()
+            # 4. Enter passcode and name
+            await page.get_by_placeholder("Код доступа конференции").fill(pwd)
+            await page.get_by_placeholder("Ваше имя").fill("SHAI AI Notetaker")
+            print("✅ Entered passcode and name.")
+
+            # 5. Join the meeting
+            await page.get_by_role("button", name="Войти").click()
+            print("✅ Clicked final Join button.")
             
             # Wait to enter the meeting room by looking for the leave button
             await page.get_by_role("button", name=re.compile("Leave", re.I)).wait_for(state="visible", timeout=60000)
