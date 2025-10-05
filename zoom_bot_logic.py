@@ -127,19 +127,27 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await frame.locator('body').wait_for(timeout=30000)
             await snap("02_iframe_loaded")
 
-            # --- FINAL FIX: Handle Cookie Consent Dialog INSIDE THE IFRAME ---
+            # Handle Cookie Consent Dialog INSIDE THE IFRAME
             try:
-                # The cookie button is inside the iframe, so we search within the 'frame' object.
                 accept_cookies_button = frame.get_by_role("button", name="ACCEPT COOKIES")
                 await accept_cookies_button.click(timeout=15000)
                 print("✅ Accepted cookies.")
                 await snap("03_cookies_accepted")
             except TimeoutError:
                 print("ℹ️ Cookie consent dialog did not appear in the iframe.")
+            
+            # --- FINAL FIX: Handle "I Agree" for Terms of Service ---
+            try:
+                i_agree_button = frame.get_by_role("button", name="I Agree")
+                await i_agree_button.click(timeout=15000)
+                print("✅ Agreed to Terms of Service.")
+                await snap("04_terms_agreed")
+            except TimeoutError:
+                print("ℹ️ 'I Agree' button did not appear.")
 
             await frame.get_by_role("button", name=re.compile("Mute|Выключить звук", re.I)).click(timeout=10000)
             await frame.get_by_role("button", name=re.compile("Stop Video|Остановить видео", re.I)).click(timeout=10000)
-            await snap("04_mic_and_video_off")
+            await snap("05_mic_and_video_off")
 
             await frame.locator('input[type="password"], input[type="text"]').first.focus()
             await page.keyboard.type(pwd)
@@ -148,10 +156,10 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await page.keyboard.press("Tab")
             await page.keyboard.press("Tab")
             await page.keyboard.press("Enter")
-            await snap("05_form_submitted")
+            await snap("06_form_submitted")
 
             await frame.get_by_role("button", name=re.compile("Leave|Завершение", re.I)).wait_for(state="visible", timeout=60000)
-            await snap("06_in_meeting")
+            await snap("07_in_meeting")
             
             job_status[job_id] = {"status": "recording"}
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -169,7 +177,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 }
             }""")
             print("🔊 Ensured browser audio is unmuted.")
-            await snap("07_audio_unmuted")
+            await snap("08_audio_unmuted")
 
             while True:
                 await asyncio.sleep(5)
@@ -181,14 +189,14 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     count_text = await participants_button.get_attribute("aria-label") or ""
                     match = re.search(r'\d+', count_text)
                     if match and int(match.group()) <= 1:
-                        await snap("08_only_one_participant_left")
+                        await snap("09_only_one_participant_left")
                         break
                 except Exception:
-                    await snap("09_participants_button_not_found")
+                    await snap("10_participants_button_not_found")
                     break
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
-            await snap("10_error_occurred")
+            await snap("11_error_occurred")
         finally:
             if recorder and recorder.poll() is None:
                 recorder.terminate()
@@ -196,10 +204,10 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             try:
                 if frame:
-                    await snap("11_attempting_to_leave")
+                    await snap("12_attempting_to_leave")
                     leave_btn_text = re.compile("^Leave$|^Завершение$", re.I)
                     await frame.get_by_role("button", name=leave_btn_text).click(timeout=5000)
-                    await snap("12_leave_button_clicked")
+                    await snap("13_leave_button_clicked")
                     
                     try:
                         confirm_btn_text = re.compile("Leave Meeting|Выйти из конференции", re.I)
