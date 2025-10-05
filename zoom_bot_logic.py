@@ -17,11 +17,9 @@ def get_ffmpeg_command(platform, duration, output_path):
 
 def extract_meeting_details(url: str):
     """Extracts meeting ID and password from a Zoom URL."""
-    # Pattern for /j/ links
     match = re.search(r'/j/(\d+)\?pwd=([\w.-]+)', url)
     if match:
         return match.group(1), match.group(2)
-    # Add other URL patterns if needed
     return None, None
 
 def transcribe_audio(audio_path, transcript_path):
@@ -86,33 +84,38 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         recorder = None
         try:
             job_status[job_id] = {"status": "navigating"}
-            # 1. Navigate to the generic join page
             await page.goto("https://app.zoom.us/wc/join", timeout=60000)
             print("✅ Navigated to join page.")
 
-            # 2. Enter Meeting ID
-            await page.get_by_placeholder("Идентификатор конференции").fill(meeting_id)
-            await page.get_by_role("button", name="Подключиться").click()
+            # *** FIX: Use bilingual selector for Meeting ID input ***
+            meeting_id_placeholder = re.compile("Meeting ID|Идентификатор конференции", re.IGNORECASE)
+            await page.get_by_placeholder(meeting_id_placeholder).fill(meeting_id)
+
+            join_button_text = re.compile("Join|Подключиться", re.IGNORECASE)
+            await page.get_by_role("button", name=join_button_text).click()
             print(f"✅ Entered Meeting ID: {meeting_id}")
 
-            # 3. Handle the two popups
-            # First popup: "Продолжить без микрофона и камеры"
-            await page.get_by_role("button", name="Продолжить без микрофона и камеры").click(timeout=15000)
+            # Handle bilingual popups
+            popup1_text = re.compile("Continue without microphone and camera|Продолжить без микрофона и камеры", re.IGNORECASE)
+            await page.get_by_role("button", name=popup1_text).click(timeout=15000)
             print("✅ Handled first permission pop-up.")
-            # Second popup: "Продолжить без микрофона"
-            await page.get_by_role("button", name="Продолжить без микрофона").click(timeout=15000)
+
+            popup2_text = re.compile("Continue without microphone|Продолжить без микрофона", re.IGNORECASE)
+            await page.get_by_role("button", name=popup2_text).click(timeout=15000)
             print("✅ Handled second permission pop-up.")
 
-            # 4. Enter passcode and name
-            await page.get_by_placeholder("Код доступа конференции").fill(pwd)
-            await page.get_by_placeholder("Ваше имя").fill("SHAI AI Notetaker")
+            # Enter passcode and name with bilingual selectors
+            passcode_placeholder = re.compile("Meeting Passcode|Код доступа конференции", re.IGNORECASE)
+            await page.get_by_placeholder(passcode_placeholder).fill(pwd)
+
+            name_placeholder = re.compile("Your Name|Ваше имя", re.IGNORECASE)
+            await page.get_by_placeholder(name_placeholder).fill("SHAI AI Notetaker")
             print("✅ Entered passcode and name.")
 
-            # 5. Join the meeting
-            await page.get_by_role("button", name="Войти").click()
+            final_join_button_text = re.compile(r"^Join$|^Войти$", re.IGNORECASE)
+            await page.get_by_role("button", name=final_join_button_text).click()
             print("✅ Clicked final Join button.")
             
-            # Wait to enter the meeting room by looking for the leave button
             await page.get_by_role("button", name=re.compile("Leave", re.I)).wait_for(state="visible", timeout=60000)
             
             job_status[job_id] = {"status": "recording"}
