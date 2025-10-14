@@ -86,10 +86,23 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await page.goto(meeting_url, timeout=60000)
             await page.locator('input[placeholder="Your name"]').fill("SHAI.PRO Notetaker")
             
+            # --- START: ROBUST CAMERA AND MIC CONTROL ---
             try:
-                await page.get_by_role("button", name="Turn off microphone").click(timeout=10000)
-                await page.get_by_role("button", name="Turn off camera").click(timeout=10000)
-            except Exception: pass
+                # Check if mic is on (aria-pressed="true") before clicking
+                mic_button = page.get_by_role("button", name="Turn off microphone")
+                if await mic_button.get_attribute("aria-pressed") == "true":
+                    await mic_button.click(timeout=5000)
+                    print("🎤 Microphone turned off.")
+                
+                # Check if camera is on (aria-pressed="true") before clicking
+                cam_button = page.get_by_role("button", name="Turn off camera")
+                if await cam_button.get_attribute("aria-pressed") == "true":
+                    await cam_button.click(timeout=5000)
+                    print("📷 Camera turned off.")
+            except Exception as e:
+                print(f"⚠️ Could not turn off camera/mic: {e}")
+            # --- END: ROBUST CAMERA AND MIC CONTROL ---
+
 
             join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
             await join_button_locator.wait_for(timeout=15000)
@@ -104,23 +117,16 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
             captions_enabled = False
             try:
-                print("💬 Attempting to enable captions (Method 1: Direct Button)...")
+                print("💬 Attempting to enable captions...")
                 caption_button = page.get_by_role("button", name=re.compile("caption", re.IGNORECASE))
                 await caption_button.click(timeout=7000)
                 print("✅ Clicked direct caption button.")
                 captions_enabled = True
-            except Exception:
-                print("⚠️ Method 1 failed. Trying Method 2 (More Options Menu)...")
-                try:
-                    await page.get_by_role("button", name="More options").click(timeout=5000)
-                    await page.get_by_role("menuitem", name=re.compile("Turn on captions", re.IGNORECASE)).click(timeout=5000)
-                    print("✅ Clicked 'Turn on captions' via menu.")
-                    captions_enabled = True
-                except Exception as e:
-                    screenshot_path = os.path.join(output_dir, "caption_error_screenshot.png")
-                    await page.screenshot(path=screenshot_path)
-                    print(f"📸 Screenshot saved to {screenshot_path}")
-                    print(f"⚠️ Both methods failed. Could not enable captions. Error: {e}")
+            except Exception as e:
+                screenshot_path = os.path.join(output_dir, "caption_error_screenshot.png")
+                await page.screenshot(path=screenshot_path)
+                print(f"📸 Screenshot saved to {screenshot_path}")
+                print(f"⚠️ Could not enable captions. Error: {e}")
             
             if captions_enabled:
                 await asyncio.sleep(3)
@@ -158,7 +164,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     // We watch the entire page (document.body) for changes. This is the most
                     // robust way to catch the caption elements when they are added.
                     observer.observe(document.body, { childList: true, subtree: true });
-                    console.log("---BROWSER--- FINAL VERSION 3.0 of caption observer is running.");
+                    console.log("---BROWSER--- FINAL VERSION 4.0 of caption observer is running.");
                 }""")
                 # --- END: FINAL, WORKING JAVASCRIPT SCRAPER ---
 
@@ -176,7 +182,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
                     await locator.wait_for(state="visible", timeout=3000)
                     count_text = await locator.get_attribute("aria-label") or ""
-                    match = re.search(r'\\d+', count_text)
+                    match = re.search(r'\d+', count_text)
                     if match and int(match.group()) <= 1:
                         print("👤 Only 1 participant left. Ending recording.")
                         break
