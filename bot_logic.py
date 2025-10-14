@@ -72,11 +72,16 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             context = await browser.new_context(permissions=["microphone", "camera"])
 
             async def handle_caption_event(data):
-                speaker = data.get('speaker', 'Unknown')
+                speaker = data.get('name', 'Unknown')  # Changed from 'speaker' to 'name'
                 text = data.get('text', '')
                 print(f"✅ CAPTION from [{speaker}]: {text}")
                 try:
-                    requests.post(f"{BACKEND_URL}/captions/{job_id}", json=data, timeout=5)
+                    # Send to backend with correct schema
+                    requests.post(
+                        f"{BACKEND_URL}/captions/{job_id}", 
+                        json=data,  # data already has correct structure: name, text, timestamp
+                        timeout=5
+                    )
                 except requests.exceptions.RequestException as e:
                     print(f"❌ Could not send caption to backend: {e}")
 
@@ -128,33 +133,22 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             captions_enabled = False
             try:
                 print("💬 Attempting to enable captions...")
-                
-                # Dismiss any overlays first
                 await page.keyboard.press("Escape")
                 await asyncio.sleep(1)
-                
-                # Try keyboard shortcut (correct Playwright Python syntax)
-                await page.keyboard.press("C", delay=100)
-                await asyncio.sleep(1)
                 await page.keyboard.press("Shift+C")
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
                 
-                # Check if captions are visible
                 try:
                     caption_container = page.locator('div[jsname="dsyhDe"]')
                     await caption_container.wait_for(state="visible", timeout=5000)
-                    print("✅ Captions enabled via keyboard shortcut.")
+                    print("✅ Captions enabled.")
                     captions_enabled = True
                 except TimeoutError:
-                    # Fallback: try clicking the caption button
                     print("⚠️ Keyboard shortcut failed, trying button click...")
                     try:
-                        # Look for captions button using multiple possible selectors
                         caption_selectors = [
                             'button[aria-label*="caption" i]',
-                            'button[aria-label*="Captions" i]',
                             'div[role="button"][aria-label*="caption" i]',
-                            'button[jsname="r8qRAd"]'  # Known caption button jsname
                         ]
                         
                         for selector in caption_selectors:
@@ -180,231 +174,146 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             if captions_enabled:
                 try:
-                    print("... Waiting for caption UI to become active...")
+                    print("... Waiting for actual spoken captions to appear...")
                     
-                    # Wait for actual caption text to appear (not just the container)
-                    await page.wait_for_function("""() => {
-                        // Look for the caption container
-                        const container = document.querySelector('div[jsname="dsyhDe"]');
-                        if (!container) return false;
-                        
-                        // Check if it has any text content
-                        const hasContent = container.textContent?.trim().length > 0;
-                        return hasContent;
-                    }""", timeout=30000)
+                    # Wait specifically for caption text elements to appear
+                    await page.wait_for_selector('div[jsname="tgaKEf"]', timeout=30000)
                     
-                    print("✅ Caption UI is active. Injecting observer...")
+                    print("✅ Caption text detected. Injecting focused observer...")
 
-                    # Inject the MutationObserver based on actual DOM structure
+                    # Inject a MUCH MORE FOCUSED observer that ONLY watches caption elements
                     await page.evaluate("""() => {
+                        console.log('[CAPTION-OBSERVER] Starting focused caption observer...');
+                        
                         let lastSpeaker = 'Unknown Speaker';
-                        const seenCaptions = new Map(); // Use Map with timestamp for better deduplication
+                        const seenCaptions = new Map();
                         
-                        // Extract speaker name - based on actual DOM structure
-                        const getSpeaker = (element) => {
+                        // Find the actual caption container
+                        const captionContainer = document.querySelector('div[jsname="dsyhDe"]');
+                        if (!captionContainer) {
+                            console.error('[CAPTION-OBSERVER] Caption container not found!');
+                            return;
+                        }
+                        
+                        console.log('[CAPTION-OBSERVER] Found caption container:', captionContainer);
+                        
+                        // Function to extract ONLY the caption text
+                        const getCaptionData = () => {
                             try {
-                                // Look for speaker name in various possible locations
-                                const speakerSelectors = [
-                                    'div[jsname="YSxPC"]',  // Common speaker name container
-                                    'div[class*="zs7s8d"]', // Alternative speaker container
-                                    'span[class*="speaker"]'
+                                // Look for speaker name element
+                                const speakerEl = captionContainer.querySelector('div[jsname="YSxPC"]');
+                                const speaker = speakerEl ? speakerEl.textContent.trim() : lastSpeaker;
+                                if (speakerEl) lastSpeaker = speaker;
+                                
+                                // Look for caption text element (the ACTUAL spoken words)
+                                const textEl = captionContainer.querySelector('div[jsname="tgaKEf"]');
+                                if (!textEl) return null;
+                                
+                                const text = textEl.textContent.trim();
+                                
+                                // Filter out empty or system messages
+                                if (!text || text.length < 2) return null;
+                                
+                                // Filter out UI noise
+                                const uiKeywords = [
+                                    'arrow_downward', 'Jump to bottom', 'Leave call',
+                                    'window.wiz', 'AF_initData', 'format_size',
+                                    'language', 'BETA', 'settings', 'timer_pause',
+                                    'more_vert', 'devices', 'visual_effects',
+                                    'keyboard_arrow_up', 'closed_caption'
                                 ];
                                 
-                                for (const selector of speakerSelectors) {
-                                    const speakerEl = element.querySelector(selector);
-                                    if (speakerEl && speakerEl.textContent?.trim()) {
-                                        const name = speakerEl.textContent.trim();
-                                        lastSpeaker = name;
-                                        return name;
-                                    }
+                                if (uiKeywords.some(kw => text.includes(kw))) {
+                                    return null;
                                 }
                                 
-                                // Fallback: check parent elements
-                                let current = element;
-                                for (let i = 0; i < 3; i++) {
-                                    if (!current) break;
-                                    const possibleSpeaker = current.querySelector('[jsname="YSxPC"]');
-                                    if (possibleSpeaker && possibleSpeaker.textContent?.trim()) {
-                                        const name = possibleSpeaker.textContent.trim();
-                                        lastSpeaker = name;
-                                        return name;
-                                    }
-                                    current = current.parentElement;
-                                }
-                                
-                                return lastSpeaker;
+                                return { speaker, text };
                             } catch (e) {
-                                console.error('[CAPTION] Error getting speaker:', e);
-                                return lastSpeaker;
+                                console.error('[CAPTION-OBSERVER] Error in getCaptionData:', e);
+                                return null;
                             }
                         };
                         
-                        // Extract caption text - based on actual DOM structure
-                        const getText = (element) => {
-                            try {
-                                // Try multiple possible caption text containers
-                                const textSelectors = [
-                                    'div[jsname="tgaKEf"]',  // Main caption text container
-                                    'div[class*="iTTPOb"]',  // Alternative text container
-                                    'span[class*="caption"]'
-                                ];
-                                
-                                for (const selector of textSelectors) {
-                                    const textEl = element.querySelector(selector);
-                                    if (textEl && textEl.textContent?.trim()) {
-                                        return textEl.textContent.trim();
-                                    }
-                                }
-                                
-                                // Fallback: get all text but remove speaker names
-                                const clone = element.cloneNode(true);
-                                clone.querySelectorAll('[jsname="YSxPC"], div[class*="zs7s8d"]').forEach(el => el.remove());
-                                const text = clone.textContent?.trim() || '';
-                                return text;
-                            } catch (e) {
-                                console.error('[CAPTION] Error getting text:', e);
-                                return '';
-                            }
-                        };
-                        
-                        // Send caption to Python
-                        const sendCaption = (element) => {
-                            try {
-                                const text = getText(element);
-                                const speaker = getSpeaker(element);
-                                
-                                // Filter invalid captions
-                                if (!text || text.length < 2) return;
-                                
-                                // Don't send if speaker name equals text
-                                if (text.toLowerCase() === speaker.toLowerCase()) return;
-                                
-                                // Deduplication with timestamp
-                                const key = `${speaker}:${text}`;
-                                const now = Date.now();
-                                
-                                // Check if we've seen this exact caption recently (within 5 seconds)
-                                if (seenCaptions.has(key)) {
-                                    const lastTime = seenCaptions.get(key);
-                                    if (now - lastTime < 5000) {
-                                        return; // Skip duplicate
-                                    }
-                                }
-                                
-                                seenCaptions.set(key, now);
-                                
-                                // Clean up old entries (older than 30 seconds)
-                                for (const [k, time] of seenCaptions.entries()) {
-                                    if (now - time > 30000) {
-                                        seenCaptions.delete(k);
-                                    }
-                                }
-                                
-                                console.log(`[CAPTION-OBSERVER] ${speaker}: ${text}`);
-                                
-                                if (window.onCaptionReceived) {
-                                    window.onCaptionReceived({
-                                        speaker: speaker,
-                                        text: text,
-                                        timestamp: new Date().toISOString()
-                                    });
-                                }
-                            } catch (e) {
-                                console.error('[CAPTION-OBSERVER] Error in sendCaption:', e);
-                            }
-                        };
-                        
-                        // Process any element that might contain captions
-                        const processElement = (element) => {
-                            if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
+                        // Function to send caption
+                        const sendCaption = (speaker, text) => {
+                            const key = `${speaker}:${text}`;
+                            const now = Date.now();
                             
-                            // Check if this is a caption container
-                            const isCaptionContainer = 
-                                element.matches('div[jsname="dsyhDe"]') ||
-                                element.querySelector('div[jsname="dsyhDe"]') ||
-                                element.matches('div[jsname="tgaKEf"]') ||
-                                element.querySelector('div[jsname="tgaKEf"]');
-                            
-                            if (isCaptionContainer) {
-                                sendCaption(element);
+                            // Deduplication
+                            if (seenCaptions.has(key)) {
+                                const lastTime = seenCaptions.get(key);
+                                if (now - lastTime < 3000) return; // Skip if seen within 3 seconds
                             }
                             
-                            // Also check children
-                            if (element.children) {
-                                for (const child of element.children) {
-                                    processElement(child);
-                                }
+                            seenCaptions.set(key, now);
+                            
+                            // Clean up old entries
+                            for (const [k, time] of seenCaptions.entries()) {
+                                if (now - time > 30000) seenCaptions.delete(k);
+                            }
+                            
+                            console.log(`[CAPTION-OBSERVER] ${speaker}: ${text}`);
+                            
+                            if (window.onCaptionReceived) {
+                                window.onCaptionReceived({
+                                    name: speaker,  // Use 'name' not 'speaker' to match backend
+                                    text: text,
+                                    timestamp: new Date().toISOString()
+                                });
                             }
                         };
                         
-                        // Set up MutationObserver
-                        const observer = new MutationObserver((mutations) => {
-                            for (const mutation of mutations) {
-                                // Handle newly added elements
-                                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-                                    mutation.addedNodes.forEach(node => {
-                                        processElement(node);
-                                    });
-                                }
-                                
-                                // Handle text changes in existing elements
-                                if (mutation.type === 'characterData' || mutation.type === 'childList') {
-                                    if (mutation.target.parentElement) {
-                                        processElement(mutation.target.parentElement);
-                                    }
-                                }
+                        // Watch ONLY the caption container for changes
+                        const observer = new MutationObserver(() => {
+                            const data = getCaptionData();
+                            if (data) {
+                                sendCaption(data.speaker, data.text);
                             }
                         });
                         
-                        // Observe the caption container specifically
-                        const captionContainer = document.querySelector('div[jsname="dsyhDe"]');
-                        if (captionContainer) {
-                            observer.observe(captionContainer, {
-                                childList: true,
-                                characterData: true,
-                                subtree: true
-                            });
-                            console.log('[CAPTION-OBSERVER] Observing caption container directly');
-                        }
-                        
-                        // Also observe body as fallback
-                        observer.observe(document.body, {
+                        // Observe only the caption container
+                        observer.observe(captionContainer, {
                             childList: true,
                             characterData: true,
                             subtree: true
                         });
                         
-                        console.log('[CAPTION-OBSERVER] Observer is now active and monitoring for captions.');
+                        console.log('[CAPTION-OBSERVER] Focused observer is now monitoring caption container only');
+                        
+                        // Also poll every 2 seconds as backup
+                        setInterval(() => {
+                            const data = getCaptionData();
+                            if (data) {
+                                sendCaption(data.speaker, data.text);
+                            }
+                        }, 2000);
                     }""")
                     
-                    print("✅ Caption observer successfully injected and running.")
+                    print("✅ Focused caption observer successfully injected.")
                     
                 except TimeoutError:
-                    print("❌ Timed out waiting for first caption to appear. Recording audio only.")
+                    print("❌ Timed out waiting for caption text. Recording audio only.")
                 except Exception as e:
                     print(f"❌ Error setting up caption observer: {e}")
                     import traceback
                     traceback.print_exc()
 
-            # Wait a bit for initial captions to be captured
+            # Wait for captions to stabilize
             await asyncio.sleep(10)
 
             # Main monitoring loop
             while True:
                 await asyncio.sleep(4)
                 
-                # Check if ffmpeg is still running
                 if recorder.poll() is not None:
                     print("❌ FFMPEG recorder process has stopped unexpectedly. Ending meeting.")
                     break
                 
-                # Check for stop signal
                 try:
                     if job_status.get(job_id, {}).get("status") == "stopping":
                         print("⏹️ Stop signal received, leaving meeting.")
                         break
                     
-                    # Check participant count
                     locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
                     await locator.wait_for(state="visible", timeout=3000)
                     count_text = await locator.get_attribute("aria-label") or ""
@@ -420,7 +329,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
             await page.screenshot(path=os.path.join(output_dir, "error.png"))
         finally:
-            # Stop ffmpeg recorder
             if recorder and recorder.poll() is None:
                 print("🛑 Terminating ffmpeg recorder process...")
                 recorder.terminate()
@@ -430,7 +338,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     recorder.kill()
                 print("✅ FFMPEG recorder stopped.")
             
-            # Leave the meeting
             try:
                 await page.get_by_role("button", name="Leave call").click(timeout=5000)
                 await asyncio.sleep(3)
@@ -439,7 +346,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             await browser.close()
 
-    # Post-processing: transcription and summarization
+    # Post-processing
     if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 4096:
         job_status[job_id] = {"status": "transcribing"}
         if transcribe_audio(output_audio_path, output_transcript_path):
