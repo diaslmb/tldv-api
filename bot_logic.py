@@ -105,13 +105,11 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await page.get_by_role("button", name="Leave call").wait_for(state="visible", timeout=45000)
             print("✅ Bot has successfully joined the meeting.")
 
-            # --- START: NEW ROBUST CAPTION LOGIC ---
             captions_enabled = False
             try:
                 print("💬 Attempting to enable captions (Method 1: Direct Button)...")
-                # This selector looks for a button with "caption" in its accessible name.
                 caption_button = page.get_by_role("button", name=re.compile("caption", re.IGNORECASE))
-                await caption_button.click(timeout=7000) # Shorter timeout for the first attempt
+                await caption_button.click(timeout=7000)
                 print("✅ Clicked direct caption button.")
                 captions_enabled = True
             except Exception:
@@ -128,41 +126,54 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     print(f"⚠️ Both methods failed. Could not enable captions. Error: {e}")
             
             if captions_enabled:
-                await asyncio.sleep(3) # Give captions a moment to initialize
-                # Inject the observer script ONLY if captions were successfully enabled
+                await asyncio.sleep(3)
+                # --- START: MODIFIED JAVASCRIPT WITH ENHANCED LOGGING ---
                 await page.evaluate("""() => {
                     const CAPTION_CONTAINER_SELECTOR = '[jscontroller="YwBA9"]'; 
                     const targetNode = document.querySelector(CAPTION_CONTAINER_SELECTOR);
 
                     if (!targetNode) {
-                        console.error('Could not find caption container. Scraping will not work.');
+                        console.error('---DEBUG--- Could not find caption container element. Scraping will not work.');
                         return;
                     }
+                    
+                    console.log('---DEBUG--- Caption container found. Attaching observer.');
 
                     const observer = new MutationObserver((mutationsList) => {
+                        console.log('---DEBUG--- Mutation detected in caption container.');
                         for(const mutation of mutationsList) {
                             if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                                 mutation.addedNodes.forEach(node => {
                                     if (node.nodeType !== Node.ELEMENT_NODE) return;
+                                    
+                                    // Log the raw HTML of the new caption line for inspection
+                                    console.log('---DEBUG--- Raw HTML of new node:', node.innerHTML);
+
                                     const speakerElement = node.querySelector('[data-id]');
                                     const textElement = node.querySelector('span');
+                                    
                                     if(speakerElement && textElement) {
                                         const speakerName = speakerElement.dataset.id;
                                         const captionText = textElement.innerText;
+                                        
+                                        console.log(`---DEBUG--- Extracted Speaker: ${speakerName}, Text: ${captionText}`);
+
                                         if(speakerName && captionText) {
                                             window.onCaptionReceived({
                                                 name: speakerName, text: captionText, timestamp: new Date().toISOString()
                                             });
                                         }
+                                    } else {
+                                        console.error('---DEBUG--- Could not find speaker or text element within the new node.');
                                     }
                                 });
                             }
                         }
                     });
                     observer.observe(targetNode, { childList: true, subtree: true });
-                    console.log("✅ Caption observer is running inside the browser.");
+                    console.log("---DEBUG--- Caption observer is now running inside the browser.");
                 }""")
-            # --- END: NEW ROBUST CAPTION LOGIC ---
+                # --- END: MODIFIED JAVASCRIPT ---
 
             await asyncio.sleep(10)
 
@@ -192,7 +203,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
             await page.screenshot(path=os.path.join(output_dir, "error.png"))
         finally:
-            if recorder and recorder.poll() is None:
+            if recorder and recorder.poll() is not None:
                 print("🛑 Terminating ffmpeg recorder process...")
                 recorder.terminate()
                 try: recorder.wait(timeout=5)
