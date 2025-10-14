@@ -5,6 +5,7 @@ import teams_bot_logic
 import zoom_bot_logic
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, field_validator
 from typing import Annotated
 from pydantic.functional_validators import AfterValidator
@@ -38,6 +39,44 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from fastapi.responses import HTMLResponse
+import os # Add this import at the top of the file
+
+# ... (after your middleware block)
+
+@app.get("/", response_class=HTMLResponse)
+async def read_root():
+    """Serves the main HTML frontend."""
+    # Ensure the path to index.html is correct relative to where you run the server
+    html_file_path = 'index.html'
+    if not os.path.exists(html_file_path):
+        raise HTTPException(status_code=404, detail="index.html not found.")
+    with open(html_file_path, 'r') as f:
+        return HTMLResponse(content=f.read(), status_code=200)
+
+# Add a new endpoint to receive caption data
+class CaptionEvent(BaseModel):
+    name: str
+    text: str
+    timestamp: str
+
+@app.post("/captions/{job_id}")
+async def receive_captions(job_id: str, event: CaptionEvent):
+    """Receives caption data from the Playwright bot."""
+    if job_id not in jobs:
+        # In production, you would check the database instead of the 'jobs' dict
+        return {"status": "error", "detail": "Job not found"}
+    
+    # For now, we will just print it. Later, this will save to the database.
+    print(f"JOB_ID [{job_id}] CAPTION from [{event.name}]: {event.text}")
+    
+    # TODO: In Phase 2, this will write event to a database table (e.g., 'utterances')
+    # For example: db.create_utterance(job_id=job_id, speaker=event.name, text=event.text, ...)
+    
+    return {"status": "received"}
+
+# ... (rest of your endpoints: /start-meeting, /status, etc.)
 
 # In-memory dictionary to store job statuses.
 jobs = {}
