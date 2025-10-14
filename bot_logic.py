@@ -65,9 +65,12 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             context = await browser.new_context(permissions=["microphone", "camera"])
 
             async def handle_caption_event(data):
-                print(f"✅ PY CAPTION from [{data.get('name')}]: {data.get('text')}")
+                speaker = data.get('speaker', 'Unknown')
+                text = data.get('text', '')
+                print(f"✅ PY CAPTION from [{speaker}]: {text}")
                 try:
-                    requests.post(f"{BACKEND_URL}/captions/{job_id}", json=data)
+                    # Added a timeout to prevent hanging
+                    requests.post(f"{BACKEND_URL}/captions/{job_id}", json=data, timeout=5)
                 except requests.exceptions.RequestException as e:
                     print(f"❌ Could not send caption to backend: {e}")
 
@@ -86,10 +89,21 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await page.goto(meeting_url, timeout=60000)
             await page.locator('input[placeholder="Your name"]').fill("SHAI.PRO Notetaker")
             
+            # --- START: ROBUST CAMERA AND MIC CONTROL ---
             try:
-                await page.get_by_role("button", name="Turn off microphone").click(timeout=10000)
-                await page.get_by_role("button", name="Turn off camera").click(timeout=10000)
-            except Exception: pass
+                mic_button = page.locator('div[data-is-muted="false"][role="button"][aria-label*="microphone"]')
+                cam_button = page.locator('div[data-is-muted="false"][role="button"][aria-label*="camera"]')
+                
+                if await mic_button.is_visible(timeout=5000):
+                    await mic_button.click()
+                    print("🎤 Microphone turned off.")
+                
+                if await cam_button.is_visible(timeout=5000):
+                    await cam_button.click()
+                    print("📷 Camera turned off.")
+            except Exception as e:
+                print(f"⚠️ Could not turn off camera/mic (they may already be off): {e}")
+            # --- END: ROBUST CAMERA AND MIC CONTROL ---
 
             join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
             await join_button_locator.wait_for(timeout=15000)
@@ -104,69 +118,63 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
             captions_enabled = False
             try:
-                print("💬 Attempting to enable captions (Method 1: Direct Button)...")
+                print("💬 Attempting to enable captions...")
                 caption_button = page.get_by_role("button", name=re.compile("caption", re.IGNORECASE))
                 await caption_button.click(timeout=7000)
                 print("✅ Clicked direct caption button.")
                 captions_enabled = True
-            except Exception:
-                print("⚠️ Method 1 failed. Trying Method 2 (More Options Menu)...")
-                try:
-                    await page.get_by_role("button", name="More options").click(timeout=5000)
-                    await page.get_by_role("menuitem", name=re.compile("Turn on captions", re.IGNORECASE)).click(timeout=5000)
-                    print("✅ Clicked 'Turn on captions' via menu.")
-                    captions_enabled = True
-                except Exception as e:
-                    screenshot_path = os.path.join(output_dir, "caption_error_screenshot.png")
-                    await page.screenshot(path=screenshot_path)
-                    print(f"📸 Screenshot saved to {screenshot_path}")
-                    print(f"⚠️ Both methods failed. Could not enable captions. Error: {e}")
+            except Exception as e:
+                screenshot_path = os.path.join(output_dir, "caption_error_screenshot.png")
+                await page.screenshot(path=screenshot_path)
+                print(f"📸 Screenshot saved to {screenshot_path}")
+                print(f"⚠️ Could not enable captions. Error: {e}")
             
             if captions_enabled:
-                await asyncio.sleep(3)
-                # --- START: FINAL, MOST ROBUST JAVASCRIPT SCRAPER ---
-                await page.evaluate("""() => {
-                    // This is the most reliable selector for the parent of all caption lines.
-                    const CAPTION_CONTAINER_SELECTOR = 'div.VfPpkd-T0kwCb';
-                    
-                    const targetNode = document.querySelector(CAPTION_CONTAINER_SELECTOR);
+                try:
+                    print("... Waiting for caption UI to become active...")
+                    # This waits for the first caption line to appear, proving the system is ready
+                    await page.wait_for_selector('div[jsname="dsyhDe"]', state="visible", timeout=30000)
+                    print("✅ Caption UI is active. Injecting observer...")
 
-                    if (!targetNode) {
-                        console.error('---BROWSER--- CRITICAL: Could not find the main caption container with selector ' + CAPTION_CONTAINER_SELECTOR + '. Scraping will fail.');
-                        return;
-                    }
-                    console.log("---BROWSER--- Successfully found caption container. Attaching observer.");
-
-                    const observer = new MutationObserver((mutations) => {
-                        for (const mutation of mutations) {
-                            if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-                                mutation.addedNodes.forEach(node => {
-                                    if (node.nodeType !== Node.ELEMENT_NODE) return;
-                                    
-                                    // The speaker's name is in the 'data-id' attribute.
-                                    const speakerName = node.dataset.id || 'Unknown Speaker';
-                                    
-                                    // The caption text is inside a child div with this specific, stable jsname.
-                                    const textElement = node.querySelector('div[jsname="jleFbf"]');
-                                    const captionText = textElement ? textElement.textContent.trim() : '';
-
-                                    if (captionText) {
-                                        console.log(`---BROWSER--- SUCCESS: Found caption for '${speakerName}': '${captionText}'`);
-                                        window.onCaptionReceived({
-                                            name: speakerName,
-                                            text: captionText,
-                                            timestamp: new Date().toISOString()
-                                        });
-                                    }
-                                });
-                            }
+                    # Inject the final, most robust version of the scraper
+                    await page.evaluate("""() => {
+                        const captionContainer = document.querySelector('div[jsname="dsyhDe"]');
+                        if (!captionContainer) {
+                            console.error("[OBSERVER] Could not find caption container!");
+                            return;
                         }
-                    });
 
-                    observer.observe(targetNode, { childList: true });
-                    console.log("---BROWSER--- FINAL VERSION 2.0 of caption observer is running.");
-                }""")
-                # --- END: FINAL, MOST ROBUST JAVASCRIPT SCRAPER ---
+                        const observer = new MutationObserver((mutations) => {
+                            for (const mutation of mutations) {
+                                if (mutation.addedNodes.length > 0) {
+                                    mutation.addedNodes.forEach(node => {
+                                        if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+                                        // Speaker name is in the 'data-id' attribute of the parent
+                                        const speakerName = node.dataset.id || 'Unknown';
+                                        
+                                        // The actual text is inside a child div with this specific name
+                                        const textElement = node.querySelector('div[jsname="tgaKEf"]');
+                                        const text = textElement ? textElement.textContent.trim() : null;
+
+                                        if (text) {
+                                            console.log(`[OBSERVER] Found: ${speakerName}: ${text}`);
+                                            window.onCaptionReceived({ speaker: speakerName, text: text });
+                                        }
+                                    });
+                                }
+                            }
+                        });
+
+                        observer.observe(captionContainer, { childList: true });
+                        console.log("[OBSERVER] Observer is now running on the correct container.");
+                    }""")
+                    
+                except TimeoutError:
+                    print("❌ Timed out waiting for first caption to appear. Recording audio only.")
+                except Exception as e:
+                    print(f"❌ An unexpected error occurred during caption setup: {e}")
+
 
             await asyncio.sleep(10)
 
@@ -182,7 +190,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
                     await locator.wait_for(state="visible", timeout=3000)
                     count_text = await locator.get_attribute("aria-label") or ""
-                    match = re.search(r'\\d+', count_text)
+                    match = re.search(r'\d+', count_text)
                     if match and int(match.group()) <= 1:
                         print("👤 Only 1 participant left. Ending recording.")
                         break
@@ -210,7 +218,9 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         job_status[job_id] = {"status": "transcribing"}
         if transcribe_audio(output_audio_path, output_transcript_path):
             job_status[job_id] = {"status": "summarizing"}
+            # --- START: FIXED TYPO ---
             summarizer = WorkflowAgentProcessor(base_url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
+            # --- END: FIXED TYPO ---
             file_id = await summarizer.upload_file(output_transcript_path)
             if file_id:
                 summary_pdf_path = os.path.join(output_dir, "summary.pdf")
