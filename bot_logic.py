@@ -65,7 +65,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             context = await browser.new_context(permissions=["microphone", "camera"])
 
             async def handle_caption_event(data):
-                print(f"PY CAPTION from [{data.get('name')}]: {data.get('text')}")
+                print(f"✅ PY CAPTION from [{data.get('name')}]: {data.get('text')}")
                 try:
                     requests.post(f"{BACKEND_URL}/captions/{job_id}", json=data)
                 except requests.exceptions.RequestException as e:
@@ -74,11 +74,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await context.expose_binding("onCaptionReceived", lambda source, data: asyncio.create_task(handle_caption_event(data)))
             
             page = await context.new_page()
-
-            # --- START: CORRECTED CONSOLE LOGGING ---
-            # The parentheses on msg.type and msg.text have been removed. This fixes the bug.
             page.on("console", lambda msg: print(f"BROWSER LOG ({msg.type}): {msg.text}"))
-            # --- END: CORRECTED CONSOLE LOGGING ---
 
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"Failed to launch browser: {e}"}
@@ -128,63 +124,50 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             if captions_enabled:
                 await asyncio.sleep(3)
+                # --- START: FINAL, ROBUST JAVASCRIPT SCRAPER ---
                 await page.evaluate("""() => {
-                    const SPEAKER_BADGE_SELECTOR = '.zs7s8d.jxF_I';
-                    let lastSpeaker = 'Unknown Speaker';
+                    // This is the container that holds all caption lines
+                    const CAPTION_PARENT_SELECTOR = 'div.a4cQT'; 
+                    // This selector identifies the div that contains the actual text of a caption line
+                    const CAPTION_TEXT_SELECTOR = 'div.iTTPOb.VA3Pne'; 
 
-                    const getSpeaker = (node) => {
-                        const badge = node.querySelector(SPEAKER_BADGE_SELECTOR);
-                        const speakerName = badge?.textContent?.trim();
-                        if (speakerName) {
-                            lastSpeaker = speakerName;
-                        }
-                        return lastSpeaker;
-                    };
+                    const targetNode = document.querySelector(CAPTION_PARENT_SELECTOR);
 
-                    const getText = (node) => {
-                        const clone = node.cloneNode(true);
-                        const speakerBadge = clone.querySelector(SPEAKER_BADGE_SELECTOR);
-                        if (speakerBadge) {
-                            speakerBadge.remove();
-                        }
-                        return clone.textContent?.trim() ?? "";
-                    };
-                    
-                    const sendCaptionData = (node) => {
-                        const text = getText(node);
-                        const speaker = getSpeaker(node);
-
-                        if (text && text.toLowerCase() !== speaker.toLowerCase()) {
-                            console.log(`---BROWSER--- Found caption for '${speaker}': '${text}'`);
-                            window.onCaptionReceived({
-                                name: speaker, text: text, timestamp: new Date().toISOString()
-                            });
-                        }
-                    };
+                    if (!targetNode) {
+                        console.error('---BROWSER--- CRITICAL: Could not find caption parent node. Scraping will fail.');
+                        return;
+                    }
 
                     const observer = new MutationObserver((mutations) => {
                         for (const mutation of mutations) {
-                            if (mutation.type === 'childList') {
-                                mutation.addedNodes.forEach((node) => {
-                                    if (node.nodeType === Node.ELEMENT_NODE && node.hasAttribute('data-id')) {
-                                        sendCaptionData(node);
+                            if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                                mutation.addedNodes.forEach(node => {
+                                    if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+                                    // The added node itself contains the speaker's name in an attribute
+                                    const speakerName = node.dataset.id || 'Unknown Speaker';
+                                    
+                                    // We then find the caption text within this new node
+                                    const textElement = node.querySelector(CAPTION_TEXT_SELECTOR);
+                                    const captionText = textElement ? textElement.textContent.trim() : '';
+
+                                    if (captionText) {
+                                        console.log(`---BROWSER--- Found caption for '${speakerName}': '${captionText}'`);
+                                        window.onCaptionReceived({
+                                            name: speakerName,
+                                            text: captionText,
+                                            timestamp: new Date().toISOString()
+                                        });
                                     }
                                 });
-                            }
-                            if (mutation.type === 'characterData' && mutation.target.parentElement?.hasAttribute('data-id')) {
-                                sendCaptionData(mutation.target.parentElement);
                             }
                         }
                     });
 
-                    observer.observe(document.body, {
-                        childList: true,
-                        characterData: true,
-                        subtree: true,
-                    });
-                    
-                    console.log("---BROWSER--- Professional-grade caption observer is running.");
+                    observer.observe(targetNode, { childList: true });
+                    console.log("---BROWSER--- FINAL caption observer is running.");
                 }""")
+                # --- END: FINAL, ROBUST JAVASCRIPT SCRAPER ---
 
             await asyncio.sleep(10)
 
@@ -200,7 +183,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
                     await locator.wait_for(state="visible", timeout=3000)
                     count_text = await locator.get_attribute("aria-label") or ""
-                    match = re.search(r'\d+', count_text)
+                    match = re.search(r'\\d+', count_text)
                     if match and int(match.group()) <= 1:
                         print("👤 Only 1 participant left. Ending recording.")
                         break
@@ -211,7 +194,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
             await page.screenshot(path=os.path.join(output_dir, "error.png"))
         finally:
-            if recorder and recorder.poll() is not None:
+            if recorder and recorder.poll() is None:
                 print("🛑 Terminating ffmpeg recorder process...")
                 recorder.terminate()
                 try: recorder.wait(timeout=5)
