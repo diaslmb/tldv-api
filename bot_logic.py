@@ -124,14 +124,16 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             if captions_enabled:
                 await asyncio.sleep(3)
+                # --- START: FINAL, MOST ROBUST JAVASCRIPT SCRAPER ---
                 await page.evaluate("""() => {
-                    const CAPTION_PARENT_SELECTOR = 'div.a4cQT'; 
-                    const CAPTION_TEXT_SELECTOR = 'div.iTTPOb.VA3Pne'; 
-
-                    const targetNode = document.querySelector(CAPTION_PARENT_SELECTOR);
+                    // This selector targets the parent container where all caption lines appear.
+                    // It uses a 'jsname' attribute which is more stable than CSS classes.
+                    const CAPTION_CONTAINER_SELECTOR = 'div[jsname="dsdc9c"]';
+                    
+                    const targetNode = document.querySelector(CAPTION_CONTAINER_SELECTOR);
 
                     if (!targetNode) {
-                        console.error('---BROWSER--- CRITICAL: Could not find caption parent node. Scraping will fail.');
+                        console.error('---BROWSER--- CRITICAL: Could not find the main caption container. Scraping will fail.');
                         return;
                     }
 
@@ -140,12 +142,16 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                             if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                                 mutation.addedNodes.forEach(node => {
                                     if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+                                    // The speaker's name is reliably in the 'data-id' attribute of the added node.
                                     const speakerName = node.dataset.id || 'Unknown Speaker';
-                                    const textElement = node.querySelector(CAPTION_TEXT_SELECTOR);
+                                    
+                                    // The text is inside a specific child span. This selector finds it.
+                                    const textElement = node.querySelector('.Q4iWsd');
                                     const captionText = textElement ? textElement.textContent.trim() : '';
 
                                     if (captionText) {
-                                        console.log(`---BROWSER--- Found caption for '${speakerName}': '${captionText}'`);
+                                        console.log(`---BROWSER--- SUCCESS: Found caption for '${speakerName}': '${captionText}'`);
                                         window.onCaptionReceived({
                                             name: speakerName,
                                             text: captionText,
@@ -158,17 +164,9 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     });
 
                     observer.observe(targetNode, { childList: true });
-                    console.log("---BROWSER--- FINAL caption observer is running.");
+                    console.log("---BROWSER--- FINAL VERSION of caption observer is running.");
                 }""")
-                
-                # --- START: NEW DEBUGGING SCREENSHOT ---
-                print("📸 Taking a timed screenshot to verify caption visibility...")
-                await asyncio.sleep(5) # Wait 5 seconds for you to start speaking
-                debug_screenshot_path = os.path.join(output_dir, "post_caption_debug_screenshot.png")
-                await page.screenshot(path=debug_screenshot_path)
-                print(f"✅ Timed screenshot saved to {debug_screenshot_path}")
-                # --- END: NEW DEBUGGING SCREENSHOT ---
-
+                # --- END: FINAL, MOST ROBUST JAVASCRIPT SCRAPER ---
 
             await asyncio.sleep(10)
 
