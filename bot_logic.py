@@ -126,28 +126,28 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 await asyncio.sleep(3)
                 # --- START: FINAL, MOST ROBUST JAVASCRIPT SCRAPER ---
                 await page.evaluate("""() => {
-                    // This selector targets the parent container where all caption lines appear.
-                    // It uses a 'jsname' attribute which is more stable than CSS classes.
-                    const CAPTION_CONTAINER_SELECTOR = 'div[jsname="dsdc9c"]';
+                    // This is the most reliable selector for the parent of all caption lines.
+                    const CAPTION_CONTAINER_SELECTOR = 'div.VfPpkd-T0kwCb';
                     
                     const targetNode = document.querySelector(CAPTION_CONTAINER_SELECTOR);
 
                     if (!targetNode) {
-                        console.error('---BROWSER--- CRITICAL: Could not find the main caption container. Scraping will fail.');
+                        console.error('---BROWSER--- CRITICAL: Could not find the main caption container with selector ' + CAPTION_CONTAINER_SELECTOR + '. Scraping will fail.');
                         return;
                     }
+                    console.log("---BROWSER--- Successfully found caption container. Attaching observer.");
 
                     const observer = new MutationObserver((mutations) => {
                         for (const mutation of mutations) {
                             if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                                 mutation.addedNodes.forEach(node => {
                                     if (node.nodeType !== Node.ELEMENT_NODE) return;
-
-                                    // The speaker's name is reliably in the 'data-id' attribute of the added node.
+                                    
+                                    // The speaker's name is in the 'data-id' attribute.
                                     const speakerName = node.dataset.id || 'Unknown Speaker';
                                     
-                                    // The text is inside a specific child span. This selector finds it.
-                                    const textElement = node.querySelector('.Q4iWsd');
+                                    // The caption text is inside a child div with this specific, stable jsname.
+                                    const textElement = node.querySelector('div[jsname="jleFbf"]');
                                     const captionText = textElement ? textElement.textContent.trim() : '';
 
                                     if (captionText) {
@@ -164,7 +164,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     });
 
                     observer.observe(targetNode, { childList: true });
-                    console.log("---BROWSER--- FINAL VERSION of caption observer is running.");
+                    console.log("---BROWSER--- FINAL VERSION 2.0 of caption observer is running.");
                 }""")
                 # --- END: FINAL, MOST ROBUST JAVASCRIPT SCRAPER ---
 
