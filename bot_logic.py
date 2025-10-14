@@ -88,21 +88,21 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             # --- START: ROBUST CAMERA AND MIC CONTROL ---
             try:
-                # Check if mic is on (aria-pressed="true") before clicking
-                mic_button = page.get_by_role("button", name="Turn off microphone")
-                if await mic_button.get_attribute("aria-pressed") == "true":
-                    await mic_button.click(timeout=5000)
+                # Use a more reliable selector for the buttons
+                mic_button = page.locator('div[data-is-muted="false"][role="button"][aria-label*="microphone"]')
+                cam_button = page.locator('div[data-is-muted="false"][role="button"][aria-label*="camera"]')
+                
+                # Click only if they are visible (i.e., not already muted)
+                if await mic_button.is_visible(timeout=5000):
+                    await mic_button.click()
                     print("🎤 Microphone turned off.")
                 
-                # Check if camera is on (aria-pressed="true") before clicking
-                cam_button = page.get_by_role("button", name="Turn off camera")
-                if await cam_button.get_attribute("aria-pressed") == "true":
-                    await cam_button.click(timeout=5000)
+                if await cam_button.is_visible(timeout=5000):
+                    await cam_button.click()
                     print("📷 Camera turned off.")
             except Exception as e:
-                print(f"⚠️ Could not turn off camera/mic: {e}")
+                print(f"⚠️ Could not turn off camera/mic (they may already be off): {e}")
             # --- END: ROBUST CAMERA AND MIC CONTROL ---
-
 
             join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
             await join_button_locator.wait_for(timeout=15000)
@@ -129,44 +129,45 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 print(f"⚠️ Could not enable captions. Error: {e}")
             
             if captions_enabled:
-                await asyncio.sleep(3)
-                # --- START: FINAL, WORKING JAVASCRIPT SCRAPER ---
-                await page.evaluate("""() => {
-                    // This is the selector for the text element, based on your screenshot.
-                    const CAPTION_TEXT_SELECTOR = 'div.iTTPOb'; 
-                    
-                    const observer = new MutationObserver((mutations) => {
-                        for (const mutation of mutations) {
-                            if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-                                mutation.addedNodes.forEach(node => {
-                                    // We look for any new element that has a 'data-id' attribute,
-                                    // which reliably indicates a new caption line.
-                                    if (node.nodeType === Node.ELEMENT_NODE && node.dataset.id) {
-                                        
-                                        const speakerName = node.dataset.id;
-                                        const textElement = node.querySelector(CAPTION_TEXT_SELECTOR);
-                                        const captionText = textElement ? textElement.textContent.trim() : '';
+                # --- START: NEW WAIT LOGIC FROM TYPESCRIPT EXAMPLE ---
+                try:
+                    print("... Waiting for caption UI to become active...")
+                    # This is the key: Wait for the first caption element to appear, proving the system is working.
+                    await page.wait_for_selector('div[data-id]', timeout=20000)
+                    print("✅ Caption UI is active.")
 
-                                        if (captionText) {
-                                            console.log(`---BROWSER--- SUCCESS: Found caption for '${speakerName}': '${captionText}'`);
-                                            window.onCaptionReceived({
-                                                name: speakerName,
-                                                text: captionText,
-                                                timestamp: new Date().toISOString()
-                                            });
+                    # Inject the observer now that we know captions are ready
+                    await page.evaluate("""() => {
+                        const CAPTION_TEXT_SELECTOR = 'div.iTTPOb'; 
+                        
+                        const observer = new MutationObserver((mutations) => {
+                            for (const mutation of mutations) {
+                                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                                    mutation.addedNodes.forEach(node => {
+                                        if (node.nodeType === Node.ELEMENT_NODE && node.dataset.id) {
+                                            const speakerName = node.dataset.id;
+                                            const textElement = node.querySelector(CAPTION_TEXT_SELECTOR);
+                                            const captionText = textElement ? textElement.textContent.trim() : '';
+
+                                            if (captionText) {
+                                                console.log(`---BROWSER--- SUCCESS: Found caption for '${speakerName}': '${captionText}'`);
+                                                window.onCaptionReceived({
+                                                    name: speakerName,
+                                                    text: captionText,
+                                                    timestamp: new Date().toISOString()
+                                                });
+                                            }
                                         }
-                                    }
-                                });
+                                    });
+                                }
                             }
-                        }
-                    });
-
-                    // We watch the entire page (document.body) for changes. This is the most
-                    // robust way to catch the caption elements when they are added.
-                    observer.observe(document.body, { childList: true, subtree: true });
-                    console.log("---BROWSER--- FINAL VERSION 4.0 of caption observer is running.");
-                }""")
-                # --- END: FINAL, WORKING JAVASCRIPT SCRAPER ---
+                        });
+                        observer.observe(document.body, { childList: true, subtree: true });
+                        console.log("---BROWSER--- FINAL VERSION 5.0 of caption observer is running.");
+                    }""")
+                except TimeoutError:
+                    print("❌ Timed out waiting for first caption to appear. Scraping will not proceed.")
+                # --- END: NEW WAIT LOGIC ---
 
             await asyncio.sleep(10)
 
@@ -182,7 +183,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
                     await locator.wait_for(state="visible", timeout=3000)
                     count_text = await locator.get_attribute("aria-label") or ""
-                    match = re.search(r'\d+', count_text)
+                    match = re.search(r'\\d+', count_text)
                     if match and int(match.group()) <= 1:
                         print("👤 Only 1 participant left. Ending recording.")
                         break
@@ -210,7 +211,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         job_status[job_id] = {"status": "transcribing"}
         if transcribe_audio(output_audio_path, output_transcript_path):
             job_status[job_id] = {"status": "summarizing"}
-            summarizer = WorkflowAgentProcessor(base_url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
+            summarizer = WorkflowAgentProcessor(base__url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
             file_id = await summarizer.upload_file(output_transcript_path)
             if file_id:
                 summary_pdf_path = os.path.join(output_dir, "summary.pdf")
