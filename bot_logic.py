@@ -124,11 +124,8 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             if captions_enabled:
                 await asyncio.sleep(3)
-                # --- START: FINAL, ROBUST JAVASCRIPT SCRAPER ---
                 await page.evaluate("""() => {
-                    // This is the container that holds all caption lines
                     const CAPTION_PARENT_SELECTOR = 'div.a4cQT'; 
-                    // This selector identifies the div that contains the actual text of a caption line
                     const CAPTION_TEXT_SELECTOR = 'div.iTTPOb.VA3Pne'; 
 
                     const targetNode = document.querySelector(CAPTION_PARENT_SELECTOR);
@@ -143,11 +140,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                             if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                                 mutation.addedNodes.forEach(node => {
                                     if (node.nodeType !== Node.ELEMENT_NODE) return;
-
-                                    // The added node itself contains the speaker's name in an attribute
                                     const speakerName = node.dataset.id || 'Unknown Speaker';
-                                    
-                                    // We then find the caption text within this new node
                                     const textElement = node.querySelector(CAPTION_TEXT_SELECTOR);
                                     const captionText = textElement ? textElement.textContent.trim() : '';
 
@@ -167,7 +160,15 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     observer.observe(targetNode, { childList: true });
                     console.log("---BROWSER--- FINAL caption observer is running.");
                 }""")
-                # --- END: FINAL, ROBUST JAVASCRIPT SCRAPER ---
+                
+                # --- START: NEW DEBUGGING SCREENSHOT ---
+                print("📸 Taking a timed screenshot to verify caption visibility...")
+                await asyncio.sleep(5) # Wait 5 seconds for you to start speaking
+                debug_screenshot_path = os.path.join(output_dir, "post_caption_debug_screenshot.png")
+                await page.screenshot(path=debug_screenshot_path)
+                print(f"✅ Timed screenshot saved to {debug_screenshot_path}")
+                # --- END: NEW DEBUGGING SCREENSHOT ---
+
 
             await asyncio.sleep(10)
 
