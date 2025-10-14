@@ -19,13 +19,9 @@ def get_ffmpeg_command(platform, duration, output_path):
     return None
 
 def transcribe_audio(audio_path, transcript_path):
-    if not os.path.exists(audio_path):
-        print(f"❌ Audio file not found at {audio_path}")
+    if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 4096:
+        print(f"❌ Audio file at {audio_path} is too small. Skipping transcription.")
         return False
-    if os.path.getsize(audio_path) < 4096:
-        print(f"❌ Audio file at {audio_path} is too small to be valid. Skipping transcription.")
-        return False
-
     print(f"🎤 Sending {audio_path} to whisperx for transcription...")
     try:
         with open(audio_path, 'rb') as f:
@@ -79,6 +75,12 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             page = await context.new_page()
 
+            # --- START: NEW BROWSER CONSOLE LOGGING ---
+            # This is the crucial debugging step. It pipes all messages from the
+            # browser's console directly into our server terminal.
+            page.on("console", lambda msg: print(f"BROWSER LOG ({msg.type()}): {msg.text()}"))
+            # --- END: NEW BROWSER CONSOLE LOGGING ---
+
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"Failed to launch browser: {e}"}
             return
@@ -127,68 +129,89 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             if captions_enabled:
                 await asyncio.sleep(3)
-                # --- START: MODIFIED JAVASCRIPT WITH ENHANCED LOGGING ---
+                # --- START: NEW, MORE ROBUST JAVASCRIPT SCRAPER ---
                 await page.evaluate("""() => {
-                    const CAPTION_CONTAINER_SELECTOR = '[jscontroller="YwBA9"]'; 
-                    const targetNode = document.querySelector(CAPTION_CONTAINER_SELECTOR);
+                    // This selector targets the speaker's name badge. It's more specific.
+                    const SPEAKER_BADGE_SELECTOR = '.zs7s8d.jxF_I'; // This might need updates
+                    let lastSpeaker = 'Unknown Speaker';
 
-                    if (!targetNode) {
-                        console.error('---DEBUG--- Could not find caption container element. Scraping will not work.');
-                        return;
-                    }
+                    // Function to extract speaker name from a caption node
+                    const getSpeaker = (node) => {
+                        const badge = node.querySelector(SPEAKER_BADGE_SELECTOR);
+                        const speakerName = badge?.textContent?.trim();
+                        // If we find a name, use it. Otherwise, assume it's the same as the last speaker.
+                        if (speakerName) {
+                            lastSpeaker = speakerName;
+                        }
+                        return lastSpeaker;
+                    };
+
+                    // Function to extract text, ignoring the speaker's name
+                    const getText = (node) => {
+                        const clone = node.cloneNode(true);
+                        const speakerBadge = clone.querySelector(SPEAKER_BADGE_SELECTOR);
+                        if (speakerBadge) {
+                            speakerBadge.remove(); // Remove the name so we only get the spoken text
+                        }
+                        return clone.textContent?.trim() ?? "";
+                    };
                     
-                    console.log('---DEBUG--- Caption container found. Attaching observer.');
+                    // The main function that sends data back to Python
+                    const sendCaptionData = (node) => {
+                        const text = getText(node);
+                        const speaker = getSpeaker(node);
 
-                    const observer = new MutationObserver((mutationsList) => {
-                        console.log('---DEBUG--- Mutation detected in caption container.');
-                        for(const mutation of mutationsList) {
-                            if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-                                mutation.addedNodes.forEach(node => {
-                                    if (node.nodeType !== Node.ELEMENT_NODE) return;
-                                    
-                                    // Log the raw HTML of the new caption line for inspection
-                                    console.log('---DEBUG--- Raw HTML of new node:', node.innerHTML);
+                        if (text && text.toLowerCase() !== speaker.toLowerCase()) {
+                            console.log(`---BROWSER--- Found caption for '${speaker}': '${text}'`);
+                            // This is the call to our Python function
+                            window.onCaptionReceived({
+                                name: speaker, text: text, timestamp: new Date().toISOString()
+                            });
+                        }
+                    };
 
-                                    const speakerElement = node.querySelector('[data-id]');
-                                    const textElement = node.querySelector('span');
-                                    
-                                    if(speakerElement && textElement) {
-                                        const speakerName = speakerElement.dataset.id;
-                                        const captionText = textElement.innerText;
-                                        
-                                        console.log(`---DEBUG--- Extracted Speaker: ${speakerName}, Text: ${captionText}`);
-
-                                        if(speakerName && captionText) {
-                                            window.onCaptionReceived({
-                                                name: speakerName, text: captionText, timestamp: new Date().toISOString()
-                                            });
-                                        }
-                                    } else {
-                                        console.error('---DEBUG--- Could not find speaker or text element within the new node.');
+                    // We create the MutationObserver to watch the whole page.
+                    // This is more robust than watching a specific container.
+                    const observer = new MutationObserver((mutations) => {
+                        for (const mutation of mutations) {
+                            // Case 1: A new caption line element is added to the page
+                            if (mutation.type === 'childList') {
+                                mutation.addedNodes.forEach((node) => {
+                                    if (node.nodeType === Node.ELEMENT_NODE && node.hasAttribute('data-id')) {
+                                        sendCaptionData(node);
                                     }
                                 });
                             }
+                            // Case 2: The text inside an existing caption line is updated
+                            if (mutation.type === 'characterData' && mutation.target.parentElement?.hasAttribute('data-id')) {
+                                sendCaptionData(mutation.target.parentElement);
+                            }
                         }
                     });
-                    observer.observe(targetNode, { childList: true, subtree: true });
-                    console.log("---DEBUG--- Caption observer is now running inside the browser.");
-                }""")
-                # --- END: MODIFIED JAVASCRIPT ---
 
+                    // Start observing the entire document body for changes.
+                    observer.observe(document.body, {
+                        childList: true,
+                        characterData: true,
+                        subtree: true,
+                    });
+                    
+                    console.log("---BROWSER--- Professional-grade caption observer is running.");
+                }""")
+                # --- END: NEW, MORE ROBUST JAVASCRIPT SCRAPER ---
+
+            # The rest of the script remains the same
             await asyncio.sleep(10)
 
             while True:
                 await asyncio.sleep(4)
-                
                 if recorder.poll() is not None:
                     print("❌ FFMPEG recorder process has stopped unexpectedly. Ending meeting.")
                     break
-
                 try:
                     if job_status.get(job_id, {}).get("status") == "stopping":
                         print("⏹️ Stop signal received, leaving meeting.")
                         break
-
                     locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
                     await locator.wait_for(state="visible", timeout=3000)
                     count_text = await locator.get_attribute("aria-label") or ""
@@ -203,13 +226,12 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
             await page.screenshot(path=os.path.join(output_dir, "error.png"))
         finally:
-            if recorder and recorder.poll() is not None:
+            if recorder and recorder.poll() is None:
                 print("🛑 Terminating ffmpeg recorder process...")
                 recorder.terminate()
                 try: recorder.wait(timeout=5)
                 except subprocess.TimeoutExpired: recorder.kill()
                 print("✅ FFMPEG recorder stopped.")
-
             try:
                 await page.get_by_role("button", name="Leave call").click(timeout=5000)
                 await asyncio.sleep(3)
@@ -219,17 +241,13 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
     if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 4096:
         job_status[job_id] = {"status": "transcribing"}
-        transcription_success = transcribe_audio(output_audio_path, output_transcript_path)
-        
-        if transcription_success:
+        if transcribe_audio(output_audio_path, output_transcript_path):
             job_status[job_id] = {"status": "summarizing"}
             summarizer = WorkflowAgentProcessor(base_url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
-            
             file_id = await summarizer.upload_file(output_transcript_path)
             if file_id:
                 summary_pdf_path = os.path.join(output_dir, "summary.pdf")
-                summary_success = await summarizer.run_workflow(file_id, summary_pdf_path)
-                if summary_success:
+                if await summarizer.run_workflow(file_id, summary_pdf_path):
                     job_status[job_id] = {"status": "completed", "transcript_path": output_transcript_path, "summary_path": summary_pdf_path}
                 else:
                     job_status[job_id] = {"status": "failed", "error": "Summarization failed."}
