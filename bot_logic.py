@@ -75,11 +75,10 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             page = await context.new_page()
 
-            # --- START: NEW BROWSER CONSOLE LOGGING ---
-            # This is the crucial debugging step. It pipes all messages from the
-            # browser's console directly into our server terminal.
-            page.on("console", lambda msg: print(f"BROWSER LOG ({msg.type()}): {msg.text()}"))
-            # --- END: NEW BROWSER CONSOLE LOGGING ---
+            # --- START: CORRECTED CONSOLE LOGGING ---
+            # The parentheses on msg.type and msg.text have been removed. This fixes the bug.
+            page.on("console", lambda msg: print(f"BROWSER LOG ({msg.type}): {msg.text}"))
+            # --- END: CORRECTED CONSOLE LOGGING ---
 
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"Failed to launch browser: {e}"}
@@ -129,52 +128,42 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             if captions_enabled:
                 await asyncio.sleep(3)
-                # --- START: NEW, MORE ROBUST JAVASCRIPT SCRAPER ---
                 await page.evaluate("""() => {
-                    // This selector targets the speaker's name badge. It's more specific.
-                    const SPEAKER_BADGE_SELECTOR = '.zs7s8d.jxF_I'; // This might need updates
+                    const SPEAKER_BADGE_SELECTOR = '.zs7s8d.jxF_I';
                     let lastSpeaker = 'Unknown Speaker';
 
-                    // Function to extract speaker name from a caption node
                     const getSpeaker = (node) => {
                         const badge = node.querySelector(SPEAKER_BADGE_SELECTOR);
                         const speakerName = badge?.textContent?.trim();
-                        // If we find a name, use it. Otherwise, assume it's the same as the last speaker.
                         if (speakerName) {
                             lastSpeaker = speakerName;
                         }
                         return lastSpeaker;
                     };
 
-                    // Function to extract text, ignoring the speaker's name
                     const getText = (node) => {
                         const clone = node.cloneNode(true);
                         const speakerBadge = clone.querySelector(SPEAKER_BADGE_SELECTOR);
                         if (speakerBadge) {
-                            speakerBadge.remove(); // Remove the name so we only get the spoken text
+                            speakerBadge.remove();
                         }
                         return clone.textContent?.trim() ?? "";
                     };
                     
-                    // The main function that sends data back to Python
                     const sendCaptionData = (node) => {
                         const text = getText(node);
                         const speaker = getSpeaker(node);
 
                         if (text && text.toLowerCase() !== speaker.toLowerCase()) {
                             console.log(`---BROWSER--- Found caption for '${speaker}': '${text}'`);
-                            // This is the call to our Python function
                             window.onCaptionReceived({
                                 name: speaker, text: text, timestamp: new Date().toISOString()
                             });
                         }
                     };
 
-                    // We create the MutationObserver to watch the whole page.
-                    // This is more robust than watching a specific container.
                     const observer = new MutationObserver((mutations) => {
                         for (const mutation of mutations) {
-                            // Case 1: A new caption line element is added to the page
                             if (mutation.type === 'childList') {
                                 mutation.addedNodes.forEach((node) => {
                                     if (node.nodeType === Node.ELEMENT_NODE && node.hasAttribute('data-id')) {
@@ -182,14 +171,12 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                                     }
                                 });
                             }
-                            // Case 2: The text inside an existing caption line is updated
                             if (mutation.type === 'characterData' && mutation.target.parentElement?.hasAttribute('data-id')) {
                                 sendCaptionData(mutation.target.parentElement);
                             }
                         }
                     });
 
-                    // Start observing the entire document body for changes.
                     observer.observe(document.body, {
                         childList: true,
                         characterData: true,
@@ -198,9 +185,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     
                     console.log("---BROWSER--- Professional-grade caption observer is running.");
                 }""")
-                # --- END: NEW, MORE ROBUST JAVASCRIPT SCRAPER ---
 
-            # The rest of the script remains the same
             await asyncio.sleep(10)
 
             while True:
@@ -226,7 +211,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
             await page.screenshot(path=os.path.join(output_dir, "error.png"))
         finally:
-            if recorder and recorder.poll() is None:
+            if recorder and recorder.poll() is not None:
                 print("🛑 Terminating ffmpeg recorder process...")
                 recorder.terminate()
                 try: recorder.wait(timeout=5)
