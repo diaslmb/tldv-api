@@ -88,7 +88,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             # --- START: ROBUST CAMERA AND MIC CONTROL ---
             try:
-                # Use a more reliable selector for the buttons
+                # Use a more reliable selector for the buttons based on their state
                 mic_button = page.locator('div[data-is-muted="false"][role="button"][aria-label*="microphone"]')
                 cam_button = page.locator('div[data-is-muted="false"][role="button"][aria-label*="camera"]')
                 
@@ -163,7 +163,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                             }
                         });
                         observer.observe(document.body, { childList: true, subtree: true });
-                        console.log("---BROWSER--- FINAL VERSION 5.0 of caption observer is running.");
+                        console.log("---BROWSER--- FINAL VERSION 6.0 of caption observer is running.");
                     }""")
                 except TimeoutError:
                     print("❌ Timed out waiting for first caption to appear. Scraping will not proceed.")
@@ -183,7 +183,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
                     await locator.wait_for(state="visible", timeout=3000)
                     count_text = await locator.get_attribute("aria-label") or ""
-                    match = re.search(r'\\d+', count_text)
+                    match = re.search(r'\d+', count_text)
                     if match and int(match.group()) <= 1:
                         print("👤 Only 1 participant left. Ending recording.")
                         break
@@ -211,7 +211,9 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         job_status[job_id] = {"status": "transcribing"}
         if transcribe_audio(output_audio_path, output_transcript_path):
             job_status[job_id] = {"status": "summarizing"}
-            summarizer = WorkflowAgentProcessor(base__url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
+            # --- START: FIXED TYPO ---
+            summarizer = WorkflowAgentProcessor(base_url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
+            # --- END: FIXED TYPO ---
             file_id = await summarizer.upload_file(output_transcript_path)
             if file_id:
                 summary_pdf_path = os.path.join(output_dir, "summary.pdf")
