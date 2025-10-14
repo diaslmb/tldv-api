@@ -9,11 +9,16 @@ from summarizer import WorkflowAgentProcessor
 
 # --- CONFIGURATION ---
 MAX_MEETING_DURATION_SECONDS = 10800
-# --- THIS IS THE LINE THAT WAS CHANGED ---
 WHISPERX_URL = "http://88.204.158.4:8080/v1/audio/transcriptions"
+# --- THIS IS THE LINE THAT WAS CHANGED ---
+# The backend URL should ideally come from a config file or environment variable
+BACKEND_URL = "http://localhost:8080"
+
 
 def get_ffmpeg_command(platform, duration, output_path):
     if platform.startswith("linux"):
+        # Using 'default' is simple but can be brittle. A more robust solution
+        # would involve creating a dedicated PulseAudio sink for the bot.
         return ["ffmpeg", "-y", "-f", "pulse", "-i", "default", "-t", str(duration), output_path]
     return None
 
@@ -21,13 +26,17 @@ def transcribe_audio(audio_path, transcript_path):
     if not os.path.exists(audio_path):
         print(f"❌ Audio file not found at {audio_path}")
         return False
+    if os.path.getsize(audio_path) < 4096: # Check if file is reasonably sized
+        print(f"❌ Audio file at {audio_path} is too small to be valid. Skipping transcription.")
+        return False
+
     print(f"🎤 Sending {audio_path} to whisperx for transcription...")
     try:
         with open(audio_path, 'rb') as f:
             files = {'file': (os.path.basename(audio_path), f)}
             # --- THIS IS THE LINE THAT WAS CHANGED ---
             data = {'model': 'whisper-large-v3'}
-            response = requests.post(WHISPERX_URL, files=files, data=data)
+            response = requests.post(WHISPERX_URL, files=files, data=data, timeout=600) # Added timeout
         if response.status_code == 200:
             transcript_data = response.json()
             clean_transcript = transcript_data.get('text', '').replace('<br>', '\n')
@@ -63,7 +72,25 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
         try:
             browser = await p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"])
             context = await browser.new_context(permissions=["microphone", "camera"])
+
+            # --- START: CAPTION HANDLING SETUP ---
+            # This Python function will be called by JavaScript from the browser page.
+            async def handle_caption_event(data):
+                """Receives caption data and sends it to the backend."""
+                print(f"PY CAPTION from [{data.get('name')}]: {data.get('text')}")
+                try:
+                    # Post the scraped data to the new /captions/{job_id} endpoint
+                    requests.post(f"{BACKEND_URL}/captions/{job_id}", json=data)
+                except requests.exceptions.RequestException as e:
+                    print(f"❌ Could not send caption to backend: {e}")
+
+            # Expose the Python function to the browser under the name 'onCaptionReceived'.
+            # This creates a bridge from the browser's JS environment back to this Python script.
+            await context.expose_binding("onCaptionReceived", lambda source, data: asyncio.create_task(handle_caption_event(data)))
+            # --- END: CAPTION HANDLING SETUP ---
+
             page = await context.new_page()
+
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"Failed to launch browser: {e}"}
             return
@@ -83,54 +110,118 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await join_button_locator.wait_for(timeout=15000)
             
             job_status[job_id] = {"status": "recording"}
+            print("▶️ Starting ffmpeg audio recorder...")
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             await join_button_locator.click(timeout=15000)
 
+            # Wait for the main meeting UI to fully load by locating a stable element like the 'Leave call' button.
+            await page.get_by_role("button", name="Leave call").wait_for(state="visible", timeout=45000)
+            print("✅ Bot has successfully joined the meeting.")
+
+            # --- START: ENABLE CAPTIONS & INJECT OBSERVER SCRIPT ---
             try:
-                await page.get_by_role("button", name="Got it").click(timeout=15000)
-            except TimeoutError: pass
-            
+                print("💬 Attempting to enable captions...")
+                await page.get_by_role("button", name="More options").click(timeout=10000)
+                await page.get_by_role("menuitem", name=re.compile("Turn on captions", re.IGNORECASE)).click(timeout=10000)
+                print("✅ Clicked 'Turn on captions'.")
+                await asyncio.sleep(3) # Give captions a moment to initialize.
+            except Exception as e:
+                print(f"⚠️ Could not enable captions automatically. Will proceed without them. Error: {e}")
+
+            # Inject the JavaScript MutationObserver to scrape live captions.
+            # This script runs inside the browser and communicates back to Python.
+            await page.evaluate("""() => {
+                const CAPTION_CONTAINER_SELECTOR = '[jscontroller="YwBA9"]'; 
+                const targetNode = document.querySelector(CAPTION_CONTAINER_SELECTOR);
+
+                if (!targetNode) {
+                    console.error('Could not find caption container element. Scraping will not work.');
+                    return;
+                }
+
+                const observer = new MutationObserver((mutationsList) => {
+                    for(const mutation of mutationsList) {
+                        if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                            mutation.addedNodes.forEach(node => {
+                                if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+                                const speakerElement = node.querySelector('[data-id]');
+                                const textElement = node.querySelector('span');
+                                
+                                if(speakerElement && textElement) {
+                                    const speakerName = speakerElement.dataset.id;
+                                    const captionText = textElement.innerText;
+                                    
+                                    if(speakerName && captionText) {
+                                        // This calls the Python function we exposed via 'expose_binding'.
+                                        window.onCaptionReceived({
+                                            name: speakerName,
+                                            text: captionText,
+                                            timestamp: new Date().toISOString()
+                                        });
+                                    }
+                                }
+                            });
+                        }
+                    }
+                });
+                observer.observe(targetNode, { childList: true, subtree: true });
+                console.log("✅ Caption observer is running inside the browser.");
+            }""")
+            # --- END: ENABLE CAPTIONS & INJECT OBSERVER SCRIPT ---
+
             await asyncio.sleep(10)
 
+            # Main monitoring loop
             while True:
-                await asyncio.sleep(4) # Check every 4 seconds for better responsiveness
+                await asyncio.sleep(4) # Check every 4 seconds
                 
+                # Heartbeat to keep the process active and check recorder status
+                if recorder.poll() is not None:
+                    print("❌ FFMPEG recorder process has stopped unexpectedly. Ending meeting.")
+                    break # Exit the loop if ffmpeg crashes
+
                 try:
                     if job_status.get(job_id, {}).get("status") == "stopping":
-                        print("Stop signal received, leaving meeting.")
+                        print("⏹️ Stop signal received, leaving meeting.")
                         break
 
                     locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
-                    await locator.wait_for(state="visible", timeout=3000) # Reduced timeout slightly
-                    count_text = await locator.get_attribute("aria-label")
+                    await locator.wait_for(state="visible", timeout=3000)
+                    count_text = await locator.get_attribute("aria-label") or ""
                     match = re.search(r'\d+', count_text)
                     if match and int(match.group()) <= 1:
-                        print("Only 1 participant left. Ending recording.")
+                        print("👤 Only 1 participant left. Ending recording.")
                         break
                 except (TimeoutError, AttributeError):
-                    print("Could not find participant count or parse it. Ending recording.")
+                    print("🚪 Could not find participant count or meeting ended. Leaving.")
                     break
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
             await page.screenshot(path=os.path.join(output_dir, "error.png"))
         finally:
             if recorder and recorder.poll() is None:
+                print("🛑 Terminating ffmpeg recorder process...")
                 recorder.terminate()
-                recorder.communicate()
-            
+                try:
+                    recorder.wait(timeout=5) # Wait for graceful termination
+                except subprocess.TimeoutExpired:
+                    recorder.kill() # Force kill if it doesn't stop
+                print("✅ FFMPEG recorder stopped.")
+
             try:
                 await page.get_by_role("button", name="Leave call").click(timeout=5000)
-                await asyncio.sleep(3)
+                await asyncio.sleep(3) # Allow time for the leave action
             except Exception: pass
             
             await browser.close()
 
-    if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 1024:
+    # --- Post-meeting processing ---
+    if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 4096:
         job_status[job_id] = {"status": "transcribing"}
         transcription_success = transcribe_audio(output_audio_path, output_transcript_path)
         
         if transcription_success:
-            # --- SUMMARIZATION STEP ---
             job_status[job_id] = {"status": "summarizing"}
             summarizer = WorkflowAgentProcessor(base_url="https://shai.pro/v1", api_key="app-GMysC0py6j6HQJsJSxI2Rbxb")
             
@@ -144,7 +235,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     job_status[job_id] = {"status": "failed", "error": "Summarization failed."}
             else:
                  job_status[job_id] = {"status": "failed", "error": "File upload for summarization failed."}
-            # --- END OF STEP ---
         else:
             job_status[job_id] = {"status": "failed", "error": "Transcription failed"}
     else:
