@@ -1,6 +1,6 @@
 import uuid
 import os
-import json # Import the json library
+import json
 import bot_logic as google_bot_logic
 import teams_bot_logic
 import zoom_bot_logic
@@ -11,7 +11,7 @@ from typing import Annotated
 from pydantic.functional_validators import AfterValidator
 from fastapi.middleware.cors import CORSMiddleware
 
-# --- URL Validation Logic (no changes) ---
+# --- URL Validation Logic ---
 def get_platform(url: str) -> str:
     if "meet.google.com" in url: return "google"
     elif "teams.live.com" in url or "teams.microsoft.com" in url: return "teams"
@@ -28,7 +28,7 @@ Url = Annotated[str, AfterValidator(check_url)]
 
 app = FastAPI()
 
-# --- CORS Middleware (no changes) ---
+# --- CORS Middleware ---
 origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
@@ -38,14 +38,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-jobs = {} # In-memory job store
+jobs = {}
 
 class MeetingRequest(BaseModel):
     meeting_url: Url
 
-# --- START: NEW CAPTION MODEL AND SAVING LOGIC ---
+# --- FIXED: Caption Model matching JavaScript payload ---
 class CaptionEvent(BaseModel):
-    name: str
+    speaker: str  # Changed from 'name' to 'speaker'
     text: str
     timestamp: str
 
@@ -54,20 +54,23 @@ async def receive_captions(job_id: str, event: CaptionEvent):
     """Receives caption data from the Playwright bot and saves it to a file."""
     job = jobs.get(job_id)
     if not job:
-        # This is expected if the job is already finished and removed from memory
-        print(f"Warning: Received caption for an unknown or completed job_id: {job_id}")
-        return {"status": "error", "detail": "Job not found"}
+        print(f"Warning: Received caption for unknown/completed job_id: {job_id}")
+        # Don't return error to avoid flooding logs
+        return {"status": "received"}
 
     output_dir = os.path.join("outputs", job_id)
     os.makedirs(output_dir, exist_ok=True)
     captions_file_path = os.path.join(output_dir, "captions.jsonl")
 
-    # Append the new caption event as a new line in the JSONL file
-    with open(captions_file_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(event.dict()) + "\n")
+    # Append caption as JSONL
+    try:
+        with open(captions_file_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event.dict()) + "\n")
+        print(f"✅ Saved caption: [{event.speaker}] {event.text[:50]}...")
+    except Exception as e:
+        print(f"❌ Error saving caption: {e}")
     
     return {"status": "received"}
-# --- END: NEW CAPTION MODEL AND SAVING LOGIC ---
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
@@ -94,7 +97,6 @@ async def start_meeting(request: MeetingRequest, background_tasks: BackgroundTas
     
     return {"message": f"Meeting bot started for {platform}.", "job_id": job_id}
 
-# --- All other endpoints (/stop-meeting, /status, etc.) remain the same ---
 @app.post("/stop-meeting/{job_id}")
 async def stop_meeting(job_id: str):
     job = jobs.get(job_id)
@@ -114,16 +116,32 @@ async def get_status(job_id: str):
 async def get_transcript(job_id: str):
     job = jobs.get(job_id)
     if not job: raise HTTPException(status_code=404, detail="Job not found")
-    if job.get("status") != "completed": raise HTTPException(status_code=400, detail=f"Job not complete. Status: {job.get('status')}")
+    if job.get("status") != "completed": 
+        raise HTTPException(status_code=400, detail=f"Job not complete. Status: {job.get('status')}")
     transcript_path = job.get("transcript_path")
-    if not transcript_path or not os.path.exists(transcript_path): raise HTTPException(status_code=404, detail="Transcript file not found.")
+    if not transcript_path or not os.path.exists(transcript_path): 
+        raise HTTPException(status_code=404, detail="Transcript file not found.")
     return FileResponse(transcript_path, media_type='text/plain', filename='transcript.txt')
 
 @app.get("/summary/{job_id}")
 async def get_summary(job_id: str):
     job = jobs.get(job_id)
     if not job: raise HTTPException(status_code=404, detail="Job not found")
-    if job.get("status") != "completed": raise HTTPException(status_code=400, detail=f"Job not complete. Status: {job.get('status')}")
+    if job.get("status") != "completed": 
+        raise HTTPException(status_code=400, detail=f"Job not complete. Status: {job.get('status')}")
     summary_path = job.get("summary_path")
-    if not summary_path or not os.path.exists(summary_path): raise HTTPException(status_code=404, detail="Summary file not found.")
+    if not summary_path or not os.path.exists(summary_path): 
+        raise HTTPException(status_code=404, detail="Summary file not found.")
     return FileResponse(summary_path, media_type='application/pdf', filename='summary.pdf')
+
+@app.get("/captions/{job_id}")
+async def get_captions(job_id: str):
+    """Endpoint to retrieve saved captions for a job."""
+    job = jobs.get(job_id)
+    if not job: raise HTTPException(status_code=404, detail="Job not found")
+    
+    captions_file_path = os.path.join("outputs", job_id, "captions.jsonl")
+    if not os.path.exists(captions_file_path):
+        raise HTTPException(status_code=404, detail="Captions file not found.")
+    
+    return FileResponse(captions_file_path, media_type='application/x-ndjson', filename='captions.jsonl')
