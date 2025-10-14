@@ -200,81 +200,19 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         let lastCaptionTime = 0;
                         const DUPLICATE_THRESHOLD_MS = 2000;
                         
-                        // List of UI keywords to filter out
-                        const UI_KEYWORDS = [
-                            'arrow_downward', 'Jump to bottom', 'language', 'English', 'BETA',
-                            'format_size', 'Font size', 'circle', 'Font color', 'settings',
-                            'keyboard_arrow_up', 'Audio settings', 'Video settings', 'Turn off',
-                            'Share screen', 'Reactions', 'captions', 'Raise hand', 'Leave call',
-                            'More options', 'Meeting details', 'People', 'Chat', 'Meeting tools',
-                            'devices', 'visual_effects', 'Backgrounds', 'Show in a tile',
-                            'more_vert', 'front_hand', 'timer_pause', 'pen_spark', 'Gemini',
-                            'domain_disabled', 'window.wiz_progress', 'window.wiz_tick',
-                            'window.IJ_values', 'AF_initDataCallback', 'ccTick',
-                            'Default', 'Tiny', 'Small', 'Medium', 'Large', 'Huge', 'Jumbo',
-                            'White', 'Black', 'Blue', 'Green', 'Red', 'Yellow', 'Cyan', 'Magenta',
-                            'mic', 'videocam', 'computer', 'mood', 'closed_caption', 'back_hand',
-                            'call_end', 'info', 'people', 'chat_bubble', 'apps', 'alarm',
-                            'Afrikaans', 'Albanian', 'Amharic', 'Arabic', 'Armenian', 'Azerbaijani',
-                            'Basque', 'Bengali', 'Bulgarian', 'Burmese', 'Catalan', 'Chinese',
-                            'Czech', 'Dutch', 'Estonian', 'Filipino', 'Finnish', 'French',
-                            'Galician', 'Georgian', 'German', 'Greek', 'Gujarati', 'Hebrew',
-                            'Hindi', 'Hungarian', 'Icelandic', 'Indonesian', 'Italian', 'Japanese',
-                            'Javanese', 'Kannada', 'Kazakh', 'Khmer', 'Kinyarwanda', 'Korean',
-                            'Latvian', 'Lithuanian', 'Macedonian', 'Malay', 'Malayalam', 'Marathi',
-                            'Mongolian', 'Nepali', 'Norwegian', 'Persian', 'Polish', 'Portuguese',
-                            'Romanian', 'Russian', 'Serbian', 'Sesotho', 'Sinhala', 'Slovak',
-                            'Slovenian', 'Spanish', 'Sundanese', 'Swahili', 'Swedish', 'Tamil',
-                            'Telugu', 'Thai', 'Turkish', 'Ukrainian', 'Urdu', 'Uzbek', 'Vietnamese',
-                            'Xhosa', 'Zulu'
-                        ];
-                        
-                        // Check if text contains UI keywords
-                        const isUIText = (text) => {
-                            if (!text || text.length < 3) return true;
-                            
-                            const lowerText = text.toLowerCase();
-                            for (const keyword of UI_KEYWORDS) {
-                                if (lowerText.includes(keyword.toLowerCase())) {
-                                    return true;
-                                }
-                            }
-                            
-                            // Check for excessive special characters
-                            const specialCharRatio = (text.match(/[^a-zA-Z0-9\s,.!?'-]/g) || []).length / text.length;
-                            if (specialCharRatio > 0.3) return true;
-                            
-                            // Check for camelCase or code patterns
-                            if (/[a-z][A-Z]/.test(text) || text.includes('()') || text.includes('{}')) return true;
-                            
-                            // Too short or too long
-                            if (text.length < 3 || text.length > 500) return true;
-                            
-                            return false;
-                        };
-                        
                         // Extract speaker name
                         const getSpeaker = (element) => {
                             try {
-                                const speakerSelectors = [
-                                    'div[jsname="YSxPC"]',
-                                    'span[data-speaker-name]',
-                                    '.zs7s8d',
-                                    '[aria-label*="Speaker"]'
-                                ];
-                                
-                                for (const selector of speakerSelectors) {
-                                    const speakerEl = element.querySelector(selector);
-                                    if (speakerEl) {
-                                        const name = speakerEl.textContent?.trim();
-                                        if (name && name.length > 0 && name.length < 50 && !isUIText(name)) {
-                                            lastSpeaker = name;
-                                            return name;
-                                        }
+                                // NEW SELECTOR based on debug output
+                                const speakerEl = element.querySelector('.NWpY1d');
+                                if (speakerEl) {
+                                    const name = speakerEl.textContent?.trim();
+                                    if (name && name.length > 0) {
+                                        lastSpeaker = name;
+                                        return name;
                                     }
                                 }
-                                
-                                return lastSpeaker;
+                                return lastSpeaker; // Return the last known speaker if not found
                             } catch (e) {
                                 console.error('[CAPTION] Error getting speaker:', e);
                                 return lastSpeaker;
@@ -284,33 +222,14 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         // Extract caption text
                         const getCaptionText = (element) => {
                             try {
-                                const textSelectors = [
-                                    'div[jsname="tgaKEf"]',
-                                    'span[jsname="bN97Pc"]',
-                                    '.iTTPOb'
-                                ];
-                                
-                                for (const selector of textSelectors) {
-                                    const textEl = element.querySelector(selector);
-                                    if (textEl) {
-                                        let text = textEl.textContent?.trim();
-                                        
-                                        if (text) {
-                                            // Remove speaker name if at start
-                                            const speaker = getSpeaker(element);
-                                            if (text.startsWith(speaker)) {
-                                                text = text.substring(speaker.length).trim();
-                                            }
-                                            
-                                            // Clean artifacts
-                                            text = text.replace(/^[:.\-]\s*/, '');
-                                            text = text.replace(/\s+/g, ' ');
-                                            
-                                            return text;
-                                        }
+                                // NEW SELECTOR based on debug output
+                                const textEl = element.querySelector('.ygicle');
+                                if (textEl) {
+                                    let text = textEl.textContent?.trim();
+                                    if (text) {
+                                        return text.replace(/\s+/g, ' ').trim();
                                     }
                                 }
-                                
                                 return '';
                             } catch (e) {
                                 console.error('[CAPTION] Error getting text:', e);
@@ -321,7 +240,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         // Send caption to backend
                         const sendCaption = (speaker, text) => {
                             try {
-                                if (!text || isUIText(text)) {
+                                if (!text) {
                                     return;
                                 }
                                 
@@ -351,21 +270,14 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                         // Process caption elements
                         const processElement = (element) => {
                             if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
-                            
-                            const captionIndicators = [
-                                'jsname="dsyhDe"',
-                                'jsname="tgaKEf"',
-                                'jsname="YSxPC"'
-                            ];
-                            
-                            const elementHTML = element.outerHTML || '';
-                            const isCaption = captionIndicators.some(indicator => elementHTML.includes(indicator));
-                            
-                            if (isCaption) {
-                                const speaker = getSpeaker(element);
-                                const text = getCaptionText(element);
+
+                            // We need to find the parent element that contains both speaker and text
+                            const mainCaptionBlock = element.closest('.nMcdL');
+                            if (mainCaptionBlock) {
+                                const speaker = getSpeaker(mainCaptionBlock);
+                                const text = getCaptionText(mainCaptionBlock);
                                 
-                                if (text && text.length >= 3) {
+                                if (text && text.length >= 2) {
                                     sendCaption(speaker, text);
                                 }
                             }
@@ -383,15 +295,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                                 }
                                 
                                 if (mutation.type === 'characterData') {
-                                    let parent = mutation.target.parentElement;
-                                    for (let i = 0; i < 5 && parent; i++) {
-                                        if (parent.getAttribute('jsname') === 'dsyhDe' || 
-                                            parent.getAttribute('jsname') === 'tgaKEf') {
-                                            processElement(parent);
-                                            break;
-                                        }
-                                        parent = parent.parentElement;
-                                    }
+                                    processElement(mutation.target.parentElement);
                                 }
                             }
                         });
@@ -413,7 +317,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                             });
                         }
                         
-                        console.log('[CAPTION-OBSERVER] Initialized with UI filtering');
+                        console.log('[CAPTION-OBSERVER] Initialized with updated selectors');
                     }""")
                     
                     print("✅ Caption observer successfully injected and running.")
