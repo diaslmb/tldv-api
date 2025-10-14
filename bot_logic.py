@@ -124,49 +124,43 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             if captions_enabled:
                 await asyncio.sleep(3)
-                # --- START: FINAL, MOST ROBUST JAVASCRIPT SCRAPER ---
+                # --- START: FINAL, WORKING JAVASCRIPT SCRAPER ---
                 await page.evaluate("""() => {
-                    // This is the most reliable selector for the parent of all caption lines.
-                    const CAPTION_CONTAINER_SELECTOR = 'div.VfPpkd-T0kwCb';
+                    // This is the selector for the text element, based on your screenshot.
+                    const CAPTION_TEXT_SELECTOR = 'div.iTTPOb'; 
                     
-                    const targetNode = document.querySelector(CAPTION_CONTAINER_SELECTOR);
-
-                    if (!targetNode) {
-                        console.error('---BROWSER--- CRITICAL: Could not find the main caption container with selector ' + CAPTION_CONTAINER_SELECTOR + '. Scraping will fail.');
-                        return;
-                    }
-                    console.log("---BROWSER--- Successfully found caption container. Attaching observer.");
-
                     const observer = new MutationObserver((mutations) => {
                         for (const mutation of mutations) {
                             if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                                 mutation.addedNodes.forEach(node => {
-                                    if (node.nodeType !== Node.ELEMENT_NODE) return;
-                                    
-                                    // The speaker's name is in the 'data-id' attribute.
-                                    const speakerName = node.dataset.id || 'Unknown Speaker';
-                                    
-                                    // The caption text is inside a child div with this specific, stable jsname.
-                                    const textElement = node.querySelector('div[jsname="jleFbf"]');
-                                    const captionText = textElement ? textElement.textContent.trim() : '';
+                                    // We look for any new element that has a 'data-id' attribute,
+                                    // which reliably indicates a new caption line.
+                                    if (node.nodeType === Node.ELEMENT_NODE && node.dataset.id) {
+                                        
+                                        const speakerName = node.dataset.id;
+                                        const textElement = node.querySelector(CAPTION_TEXT_SELECTOR);
+                                        const captionText = textElement ? textElement.textContent.trim() : '';
 
-                                    if (captionText) {
-                                        console.log(`---BROWSER--- SUCCESS: Found caption for '${speakerName}': '${captionText}'`);
-                                        window.onCaptionReceived({
-                                            name: speakerName,
-                                            text: captionText,
-                                            timestamp: new Date().toISOString()
-                                        });
+                                        if (captionText) {
+                                            console.log(`---BROWSER--- SUCCESS: Found caption for '${speakerName}': '${captionText}'`);
+                                            window.onCaptionReceived({
+                                                name: speakerName,
+                                                text: captionText,
+                                                timestamp: new Date().toISOString()
+                                            });
+                                        }
                                     }
                                 });
                             }
                         }
                     });
 
-                    observer.observe(targetNode, { childList: true });
-                    console.log("---BROWSER--- FINAL VERSION 2.0 of caption observer is running.");
+                    // We watch the entire page (document.body) for changes. This is the most
+                    // robust way to catch the caption elements when they are added.
+                    observer.observe(document.body, { childList: true, subtree: true });
+                    console.log("---BROWSER--- FINAL VERSION 3.0 of caption observer is running.");
                 }""")
-                # --- END: FINAL, MOST ROBUST JAVASCRIPT SCRAPER ---
+                # --- END: FINAL, WORKING JAVASCRIPT SCRAPER ---
 
             await asyncio.sleep(10)
 
