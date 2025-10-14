@@ -105,58 +105,64 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await page.get_by_role("button", name="Leave call").wait_for(state="visible", timeout=45000)
             print("✅ Bot has successfully joined the meeting.")
 
-            # --- START: MODIFIED CAPTION BLOCK WITH DEBUG SCREENSHOT ---
+            # --- START: NEW ROBUST CAPTION LOGIC ---
+            captions_enabled = False
             try:
-                print("💬 Attempting to enable captions...")
-                await page.get_by_role("button", name="More options").click(timeout=10000)
-                await page.get_by_role("menuitem", name=re.compile("Turn on captions", re.IGNORECASE)).click(timeout=10000)
-                print("✅ Clicked 'Turn on captions'.")
-                await asyncio.sleep(3)
-            except Exception as e:
-                # THIS IS THE NEW DEBUGGING CODE
-                screenshot_path = os.path.join(output_dir, "caption_error_screenshot.png")
-                await page.screenshot(path=screenshot_path)
-                print(f"📸 Screenshot saved to {screenshot_path}")
-                print(f"⚠️ Could not enable captions automatically. Will proceed without them. Error: {e}")
-            # --- END: MODIFIED CAPTION BLOCK ---
+                print("💬 Attempting to enable captions (Method 1: Direct Button)...")
+                # This selector looks for a button with "caption" in its accessible name.
+                caption_button = page.get_by_role("button", name=re.compile("caption", re.IGNORECASE))
+                await caption_button.click(timeout=7000) # Shorter timeout for the first attempt
+                print("✅ Clicked direct caption button.")
+                captions_enabled = True
+            except Exception:
+                print("⚠️ Method 1 failed. Trying Method 2 (More Options Menu)...")
+                try:
+                    await page.get_by_role("button", name="More options").click(timeout=5000)
+                    await page.get_by_role("menuitem", name=re.compile("Turn on captions", re.IGNORECASE)).click(timeout=5000)
+                    print("✅ Clicked 'Turn on captions' via menu.")
+                    captions_enabled = True
+                except Exception as e:
+                    screenshot_path = os.path.join(output_dir, "caption_error_screenshot.png")
+                    await page.screenshot(path=screenshot_path)
+                    print(f"📸 Screenshot saved to {screenshot_path}")
+                    print(f"⚠️ Both methods failed. Could not enable captions. Error: {e}")
+            
+            if captions_enabled:
+                await asyncio.sleep(3) # Give captions a moment to initialize
+                # Inject the observer script ONLY if captions were successfully enabled
+                await page.evaluate("""() => {
+                    const CAPTION_CONTAINER_SELECTOR = '[jscontroller="YwBA9"]'; 
+                    const targetNode = document.querySelector(CAPTION_CONTAINER_SELECTOR);
 
-            await page.evaluate("""() => {
-                const CAPTION_CONTAINER_SELECTOR = '[jscontroller="YwBA9"]'; 
-                const targetNode = document.querySelector(CAPTION_CONTAINER_SELECTOR);
-
-                if (!targetNode) {
-                    console.error('Could not find caption container element. Scraping will not work.');
-                    return;
-                }
-
-                const observer = new MutationObserver((mutationsList) => {
-                    for(const mutation of mutationsList) {
-                        if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-                            mutation.addedNodes.forEach(node => {
-                                if (node.nodeType !== Node.ELEMENT_NODE) return;
-
-                                const speakerElement = node.querySelector('[data-id]');
-                                const textElement = node.querySelector('span');
-                                
-                                if(speakerElement && textElement) {
-                                    const speakerName = speakerElement.dataset.id;
-                                    const captionText = textElement.innerText;
-                                    
-                                    if(speakerName && captionText) {
-                                        window.onCaptionReceived({
-                                            name: speakerName,
-                                            text: captionText,
-                                            timestamp: new Date().toISOString()
-                                        });
-                                    }
-                                }
-                            });
-                        }
+                    if (!targetNode) {
+                        console.error('Could not find caption container. Scraping will not work.');
+                        return;
                     }
-                });
-                observer.observe(targetNode, { childList: true, subtree: true });
-                console.log("✅ Caption observer is running inside the browser.");
-            }""")
+
+                    const observer = new MutationObserver((mutationsList) => {
+                        for(const mutation of mutationsList) {
+                            if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                                mutation.addedNodes.forEach(node => {
+                                    if (node.nodeType !== Node.ELEMENT_NODE) return;
+                                    const speakerElement = node.querySelector('[data-id]');
+                                    const textElement = node.querySelector('span');
+                                    if(speakerElement && textElement) {
+                                        const speakerName = speakerElement.dataset.id;
+                                        const captionText = textElement.innerText;
+                                        if(speakerName && captionText) {
+                                            window.onCaptionReceived({
+                                                name: speakerName, text: captionText, timestamp: new Date().toISOString()
+                                            });
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    });
+                    observer.observe(targetNode, { childList: true, subtree: true });
+                    console.log("✅ Caption observer is running inside the browser.");
+                }""")
+            # --- END: NEW ROBUST CAPTION LOGIC ---
 
             await asyncio.sleep(10)
 
@@ -189,10 +195,8 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             if recorder and recorder.poll() is None:
                 print("🛑 Terminating ffmpeg recorder process...")
                 recorder.terminate()
-                try:
-                    recorder.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    recorder.kill()
+                try: recorder.wait(timeout=5)
+                except subprocess.TimeoutExpired: recorder.kill()
                 print("✅ FFMPEG recorder stopped.")
 
             try:
