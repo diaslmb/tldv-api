@@ -3,16 +3,24 @@ import os
 import re
 from collections import defaultdict
 
+def format_seconds_to_hhmmss(seconds: float) -> str:
+    """Converts a float of total seconds into HH:MM:SS format."""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    return f"{hours:02}:{minutes:02}:{secs:02}"
+
 def parse_whisperx_transcript(transcript_text: str) -> list:
     """
     Parses the STT output text into a structured list of segments.
     """
     segments = []
+    # This regex handles multiline text within a single speaker segment
     pattern = re.compile(
-        r'\[(SPEAKER_\w+)\]\s'
-        r'\[([\d.]+) - ([\d.]+)\]\n'
-        r'(.+?)\n\n',
-        re.DOTALL
+        r'\[(SPEAKER_\w+)\]\s'      # Speaker ID (e.g., [SPEAKER_00])
+        r'\[([\d.]+) - ([\d.]+)\]\n' # Timestamp (e.g., [6.75 - 22.56])
+        r'(.+?)\n\n',               # The actual text, non-greedy
+        re.DOTALL                   # . matches newline
     )
     matches = pattern.findall(transcript_text)
     
@@ -43,8 +51,7 @@ def parse_whisperx_transcript(transcript_text: str) -> list:
 
 def merge_meeting_transcripts_by_time(job_id: str) -> bool:
     """
-    Merges transcripts by mapping speaker IDs from STT to real names from captions
-    using relative timestamps as the common reference.
+    Merges transcripts, adding formatted timestamps to the final output.
     """
     output_dir = os.path.join("outputs", job_id)
     captions_path = os.path.join(output_dir, "captions.jsonl")
@@ -57,7 +64,7 @@ def merge_meeting_transcripts_by_time(job_id: str) -> bool:
     with open(captions_path, 'r', encoding='utf-8') as f:
         captions = [json.loads(line) for line in f if line.strip()]
     if not captions:
-        print("⚠️ Captions file is empty. Cannot merge.")
+        print("⚠️ Captions file is empty. Using STT transcript only.")
         return False
     print(f"✅ Loaded {len(captions)} captions.")
 
@@ -75,8 +82,7 @@ def merge_meeting_transcripts_by_time(job_id: str) -> bool:
     for caption in captions:
         caption_time = caption.get('timestamp', -1)
         caption_speaker = caption.get('speaker', 'Unknown')
-        if caption_time < 0:
-            continue
+        if caption_time < 0: continue
         
         for segment in stt_segments:
             if segment['start'] <= caption_time <= segment['end']:
@@ -91,22 +97,20 @@ def merge_meeting_transcripts_by_time(job_id: str) -> bool:
             speaker_map[speaker_id] = winner_name
             print(f"✅ Mapped {speaker_id} -> {winner_name}")
 
+    # --- FIXED: Write final transcript with formatted timestamps ---
     with open(merged_path, 'w', encoding='utf-8') as f:
         f.write("MERGED AND DIARIZED TRANSCRIPT\n")
         f.write("=" * 80 + "\n\n")
         
-        current_speaker = None
         for segment in stt_segments:
-            speaker_id = segment['speaker_id']
-            speaker_name = speaker_map.get(speaker_id, speaker_id)
+            speaker_name = speaker_map.get(segment['speaker_id'], segment['speaker_id'])
+            # Get the formatted timestamp
+            timestamp_str = format_seconds_to_hhmmss(segment['start'])
             
-            if speaker_name != current_speaker:
-                f.write(f"\n[{speaker_name}]:\n")
-                current_speaker = speaker_name
+            f.write(f"[{timestamp_str}] {speaker_name}:\n")
+            f.write(f"{segment['text']}\n\n")
             
-            f.write(f"{segment['text']}\n")
-            
-    print(f"✅ Final merged transcript saved to {merged_path}")
+    print(f"✅ Final merged transcript with timestamps saved to {merged_path}")
     return True
 
 if __name__ == "__main__":
