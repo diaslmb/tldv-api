@@ -9,14 +9,23 @@ from summarizer import WorkflowAgentProcessor
 from caption_merger import merge_meeting_transcripts_by_time
 
 # --- CONFIGURATION ---
-MAX_MEETING_DURATION_SECONDS = 10800
 WHISPERX_URL = "http://88.204.158.4:8080/v1/audio/transcriptions"
 BACKEND_URL = "http://localhost:8080"
 
 
-def get_ffmpeg_command(platform, duration, output_path):
+# --- FIXED: MP3 Encoding and Indefinite Recording ---
+def get_ffmpeg_command(platform, output_path):
+    """
+    Generates the ffmpeg command for recording system audio to MP3.
+    - Removed the '-t' duration limit to record until manually stopped.
+    - Changed output to MP3 with a 320kbps bitrate.
+    """
     if platform.startswith("linux"):
-        return ["ffmpeg", "-y", "-f", "pulse", "-i", "default", "-t", str(duration), output_path]
+        return [
+            "ffmpeg", "-y", "-f", "pulse", "-i", "default",
+            "-acodec", "libmp3lame", "-b:a", "320k",
+            output_path
+        ]
     return None
 
 def transcribe_audio(audio_path, transcript_path):
@@ -24,6 +33,7 @@ def transcribe_audio(audio_path, transcript_path):
         print(f"❌ Audio file at {audio_path} is too small. Skipping transcription.")
         return False
     
+    print(f"🎤 Sending {os.path.basename(audio_path)} to whisperx for transcription...")
     try:
         with open(audio_path, 'rb') as f:
             files = {'file': (os.path.basename(audio_path), f)}
@@ -62,10 +72,12 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
     
     output_dir = os.path.join("outputs", job_id)
     os.makedirs(output_dir, exist_ok=True)
-    output_audio_path = os.path.join(output_dir, "meeting_audio.wav")
+    
+    # --- FIXED: Use .mp3 extension ---
+    output_audio_path = os.path.join(output_dir, "meeting_audio.mp3")
     output_transcript_path = os.path.join(output_dir, "transcript.txt")
     
-    ffmpeg_command = get_ffmpeg_command(sys.platform, MAX_MEETING_DURATION_SECONDS, output_audio_path)
+    ffmpeg_command = get_ffmpeg_command(sys.platform, output_audio_path)
     if not ffmpeg_command:
         job_status[job_id] = {"status": "failed", "error": "Unsupported OS"}
         return
@@ -115,7 +127,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await page.evaluate(f"window.MEETING_START_TIME = {recording_start_time_ms};")
             
             job_status[job_id] = {"status": "recording"}
-            print(f"▶️ Starting ffmpeg audio recorder... (T0={recording_start_time_ms})")
+            print(f"▶️ Starting ffmpeg audio recorder for {output_audio_path}...")
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             await join_button_locator.click(timeout=15000)
 
@@ -219,11 +231,15 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     print("✅ Caption observer successfully injected.")
                 except Exception as e:
                     print(f"❌ Error setting up caption observer: {e}")
-            
+        
             while True:
                 await asyncio.sleep(4)
-                if recorder.poll() is not None: break
-                if job_status.get(job_id, {}).get("status") == "stopping": print("⏹️ Stop signal received, leaving meeting."); break
+                if recorder.poll() is not None:
+                    print("❌ FFMPEG recorder process stopped unexpectedly. Ending meeting.")
+                    break
+                if job_status.get(job_id, {}).get("status") == "stopping":
+                    print("⏹️ Stop signal received, leaving meeting.")
+                    break
                 try:
                     locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
                     await locator.wait_for(state="visible", timeout=3000)
@@ -232,26 +248,37 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     if match:
                         participant_count = int(match.group(1))
                         print(f"👥 Participants: {participant_count}")
-                        if participant_count <= 1: print("👤 Only 1 participant left. Ending recording."); break
+                        if participant_count <= 1:
+                            print("👤 Only 1 participant left. Ending recording.")
+                            break
                     else:
-                        print("⚠️ Could not parse participant count. Leaving."); break
+                        print("⚠️ Could not parse participant count. Leaving.")
+                        break
                 except (TimeoutError, AttributeError):
-                    print("🚪 Could not find participant button. Leaving."); break
+                    print("🚪 Could not find participant button. Leaving.")
+                    break
                     
         except Exception as e:
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
             await page.screenshot(path=os.path.join(output_dir, "error.png"))
         finally:
             if recorder and recorder.poll() is None:
+                print("🛑 Terminating ffmpeg recorder process...")
                 recorder.terminate()
-                try: recorder.wait(timeout=5)
-                except subprocess.TimeoutExpired: recorder.kill()
+                try:
+                    recorder.wait(timeout=10) # Give it time to finalize the MP3
+                except subprocess.TimeoutExpired:
+                    recorder.kill()
+                print("✅ FFMPEG recorder stopped.")
+            
             try:
                 await page.get_by_role("button", name="Leave call").click(timeout=5000)
                 await asyncio.sleep(3)
             except Exception: pass
+            
             await browser.close()
-
+    
+    # Post-processing...
     if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 4096:
         if transcribe_audio(output_audio_path, output_transcript_path):
             merged_transcript_path = os.path.join(output_dir, "merged_transcript.txt")
@@ -264,14 +291,14 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             if file_id:
                 summary_pdf_path = os.path.join(output_dir, "summary.pdf")
                 if await summarizer.run_workflow(file_id, summary_pdf_path):
-                    job_status[job_id] = {"status": "completed", "transcript_path": output_transcript_path, "merged_transcript_path": merged_transcript_path, "summary_path": summary_pdf_path}
+                    job_status[job_id] = {
+                        "status": "completed", 
+                        "transcript_path": output_transcript_path,
+                        "merged_transcript_path": final_transcript_path,
+                        "summary_path": summary_pdf_path
+                    }
                 else: job_status[job_id] = {"status": "failed", "error": "Summarization failed."}
             else: job_status[job_id] = {"status": "failed", "error": "File upload for summarization failed."}
         else: job_status[job_id] = {"status": "failed", "error": "Transcription failed"}
     else:
-        # If transcription failed, check if we at least have captions to process
-        captions_path = os.path.join(output_dir, "captions.jsonl")
-        if os.path.exists(captions_path) and os.path.getsize(captions_path) > 0:
-             job_status[job_id] = {"status": "failed", "error": "Audio recording failed, but captions were saved."}
-        else:
-             job_status[job_id] = {"status": "failed", "error": "Audio recording was empty or failed, and no captions were captured."}
+        job_status[job_id] = {"status": "failed", "error": "Audio recording was empty or failed"}
