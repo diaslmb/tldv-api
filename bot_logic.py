@@ -127,7 +127,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             job_status[job_id] = {"status": "recording"}
             print(f"▶️ Starting ffmpeg audio recorder for {output_audio_path}...")
-            # *** MODIFICATION 1: Add stdin=subprocess.PIPE ***
             recorder = subprocess.Popen(ffmpeg_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             await join_button_locator.click(timeout=15000)
 
@@ -258,14 +257,10 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
             await page.screenshot(path=os.path.join(output_dir, "error.png"))
         finally:
-            # *** MODIFICATION 2: Graceful Shutdown Logic ***
             if recorder and recorder.poll() is None:
                 print("🛑 Sending graceful shutdown ('q') to ffmpeg...")
                 try:
-                    recorder.stdin.write(b'q')
-                    recorder.stdin.close()
-                    # Wait for ffmpeg to finish writing the file
-                    stdout, stderr = recorder.communicate(timeout=20) 
+                    stdout, stderr = recorder.communicate(input=b'q', timeout=20)
                     print("✅ FFMPEG recorder stopped gracefully.")
                 except subprocess.TimeoutExpired:
                     print("⚠️ ffmpeg did not respond to graceful shutdown. Killing process.")
@@ -280,7 +275,7 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 print("\n--- FFMPEG LOG ---")
                 print(ffmpeg_output)
                 print("------------------\n")
-
+            
             try:
                 await page.get_by_role("button", name="Leave call").click(timeout=5000)
                 await asyncio.sleep(3)
