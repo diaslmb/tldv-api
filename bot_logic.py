@@ -73,7 +73,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
     output_dir = os.path.join("outputs", job_id)
     os.makedirs(output_dir, exist_ok=True)
     
-    # --- FIXED: Use .mp3 extension ---
     output_audio_path = os.path.join(output_dir, "meeting_audio.mp3")
     output_transcript_path = os.path.join(output_dir, "transcript.txt")
     
@@ -128,7 +127,8 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             job_status[job_id] = {"status": "recording"}
             print(f"▶️ Starting ffmpeg audio recorder for {output_audio_path}...")
-            recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # *** MODIFICATION 1: Add stdin=subprocess.PIPE ***
+            recorder = subprocess.Popen(ffmpeg_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             await join_button_locator.click(timeout=15000)
 
             await page.get_by_role("button", name="Leave call").wait_for(state="visible", timeout=45000)
@@ -136,21 +136,18 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             print("⏳ Waiting 10 seconds for meeting UI to stabilize...")
             await asyncio.sleep(10)
             
-            # --- FIXED: More robust caption enabling logic ---
             captions_enabled = False
             try:
                 print("💬 Attempting to enable captions...")
                 caption_container_locator = page.locator('div[jsname="dsyhDe"]')
-                # Try keyboard shortcut first
                 await page.keyboard.press("c")
-                await asyncio.sleep(1) # Give it a moment to react
+                await asyncio.sleep(1)
                 await caption_container_locator.wait_for(state="visible", timeout=3000)
                 print("✅ Captions enabled via keyboard shortcut.")
                 captions_enabled = True
             except TimeoutError:
                 print("⚠️ Keyboard shortcut failed, trying button click...")
                 try:
-                    # Fallback to clicking the most likely button
                     caption_button = page.locator('button[jsname="r8qRAd"], button[aria-label*="caption"]').first
                     await caption_button.click(timeout=5000)
                     await caption_container_locator.wait_for(state="visible", timeout=3000)
@@ -164,7 +161,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     await page.wait_for_function("() => document.querySelector('div[jsname=\"dsyhDe\"]')?.textContent?.trim().length > 0", timeout=30000)
                     print("✅ Caption UI is active. Injecting observer...")
                     
-                    # --- FIXED: Restored robust MutationObserver JavaScript ---
                     await page.evaluate("""() => {
                         let lastSpeaker = 'Unknown Speaker';
                         let lastCaptionText = '';
@@ -262,15 +258,29 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
             await page.screenshot(path=os.path.join(output_dir, "error.png"))
         finally:
+            # *** MODIFICATION 2: Graceful Shutdown Logic ***
             if recorder and recorder.poll() is None:
-                print("🛑 Terminating ffmpeg recorder process...")
-                recorder.terminate()
+                print("🛑 Sending graceful shutdown ('q') to ffmpeg...")
                 try:
-                    recorder.wait(timeout=10) # Give it time to finalize the MP3
+                    recorder.stdin.write(b'q')
+                    recorder.stdin.close()
+                    # Wait for ffmpeg to finish writing the file
+                    stdout, stderr = recorder.communicate(timeout=20) 
+                    print("✅ FFMPEG recorder stopped gracefully.")
                 except subprocess.TimeoutExpired:
+                    print("⚠️ ffmpeg did not respond to graceful shutdown. Killing process.")
                     recorder.kill()
-                print("✅ FFMPEG recorder stopped.")
-            
+                    stdout, stderr = recorder.communicate()
+                except Exception as e:
+                    print(f"⚠️ An error occurred during ffmpeg shutdown: {e}")
+                    recorder.kill()
+                    stdout, stderr = recorder.communicate()
+
+                ffmpeg_output = stderr.decode(errors='ignore')
+                print("\n--- FFMPEG LOG ---")
+                print(ffmpeg_output)
+                print("------------------\n")
+
             try:
                 await page.get_by_role("button", name="Leave call").click(timeout=5000)
                 await asyncio.sleep(3)
