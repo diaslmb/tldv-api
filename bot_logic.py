@@ -1,12 +1,13 @@
 import os
 import re
+import time # IMPORTED
 import asyncio
 import subprocess
 from playwright.async_api import async_playwright, TimeoutError
 import requests
 import uuid
 from summarizer import WorkflowAgentProcessor
-from caption_merger import merge_meeting_transcripts
+from caption_merger import merge_meeting_transcripts_by_time # UPDATED IMPORT
 
 # --- CONFIGURATION ---
 MAX_MEETING_DURATION_SECONDS = 10800
@@ -31,9 +32,24 @@ def transcribe_audio(audio_path, transcript_path):
             response = requests.post(WHISPERX_URL, files=files, data=data, timeout=600)
         if response.status_code == 200:
             transcript_data = response.json()
-            clean_transcript = transcript_data.get('text', '').replace('<br>', '\n')
-            with open(transcript_path, 'w') as f:
+            # WhisperX can return text or segments, we handle both for robustness
+            if 'text' in transcript_data:
+                clean_transcript = transcript_data.get('text', '').replace('<br>', '\n')
+            elif 'segments' in transcript_data:
+                 # Reconstruct the text format you were using
+                 clean_transcript = ""
+                 for seg in transcript_data['segments']:
+                     speaker = seg.get('speaker', 'SPEAKER_UNKNOWN')
+                     start = seg.get('start', 0)
+                     end = seg.get('end', 0)
+                     text = seg.get('text', '').strip()
+                     clean_transcript += f"[{speaker}] [{start:.2f} - {end:.2f}]\n {text}\n\n"
+            else:
+                clean_transcript = ""
+                
+            with open(transcript_path, 'w', encoding='utf-8') as f:
                 f.write(clean_transcript)
+
             print(f"✅ Transcription successful. Saved to {transcript_path}")
             return True
         else:
@@ -117,207 +133,127 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
             await join_button_locator.wait_for(timeout=15000)
             
+            # --- CAPTURE T0 AND START RECORDING ---
+            recording_start_time_ms = int(time.time() * 1000)
+            await page.evaluate(f"window.MEETING_START_TIME = {recording_start_time_ms};")
+            
             job_status[job_id] = {"status": "recording"}
-            print("▶️ Starting ffmpeg audio recorder...")
+            print(f"▶️ Starting ffmpeg audio recorder... (T0={recording_start_time_ms})")
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             await join_button_locator.click(timeout=15000)
 
             await page.get_by_role("button", name="Leave call").wait_for(state="visible", timeout=45000)
             print("✅ Bot has successfully joined the meeting.")
 
-            # Enable captions
+            # Enable captions logic remains the same...
             captions_enabled = False
             try:
                 print("💬 Attempting to enable captions...")
-                
-                # Dismiss any overlays first
                 await page.keyboard.press("Escape")
                 await asyncio.sleep(1)
-                
-                # Try keyboard shortcut
                 await page.keyboard.press("C", delay=100)
                 await asyncio.sleep(1)
                 await page.keyboard.press("Shift+C")
                 await asyncio.sleep(2)
-                
-                # Check if captions are visible
+                caption_container_locator = page.locator('div[jsname="dsyhDe"]')
+                await caption_container_locator.wait_for(state="visible", timeout=5000)
+                print("✅ Captions enabled.")
+                captions_enabled = True
+            except TimeoutError:
+                print("⚠️ Caption keyboard shortcut/check failed. Trying button.")
+                # Fallback to button click...
                 try:
-                    caption_container = page.locator('div[jsname="dsyhDe"]')
-                    await caption_container.wait_for(state="visible", timeout=5000)
-                    print("✅ Captions enabled via keyboard shortcut.")
+                    caption_button = page.locator('button[jsname="r8qRAd"]').first
+                    await caption_button.click(timeout=5000)
+                    await caption_container_locator.wait_for(state="visible", timeout=5000)
+                    print("✅ Captions enabled via button click.")
                     captions_enabled = True
-                except TimeoutError:
-                    # Fallback: try clicking the caption button
-                    print("⚠️ Keyboard shortcut failed, trying button click...")
-                    try:
-                        caption_selectors = [
-                            'button[aria-label*="caption" i]',
-                            'button[aria-label*="Captions" i]',
-                            'div[role="button"][aria-label*="caption" i]',
-                            'button[jsname="r8qRAd"]'
-                        ]
-                        
-                        for selector in caption_selectors:
-                            try:
-                                button = page.locator(selector).first
-                                if await button.is_visible(timeout=2000):
-                                    await button.click()
-                                    await asyncio.sleep(2)
-                                    await caption_container.wait_for(state="visible", timeout=3000)
-                                    print("✅ Captions enabled via button click.")
-                                    captions_enabled = True
-                                    break
-                            except:
-                                continue
-                    except Exception as btn_err:
-                        print(f"⚠️ Button click also failed: {btn_err}")
-                    
-            except Exception as e:
-                screenshot_path = os.path.join(output_dir, "caption_error_screenshot.png")
-                await page.screenshot(path=screenshot_path)
-                print(f"📸 Screenshot saved to {screenshot_path}")
-                print(f"⚠️ Could not enable captions. Error: {e}")
+                except Exception as e:
+                    print(f"⚠️ Could not enable captions via button either: {e}")
             
             if captions_enabled:
                 try:
                     print("... Waiting for caption UI to become active...")
-                    
-                    # Wait for actual caption text to appear
-                    await page.wait_for_function("""() => {
-                        const container = document.querySelector('div[jsname="dsyhDe"]');
-                        if (!container) return false;
-                        const hasContent = container.textContent?.trim().length > 0;
-                        return hasContent;
-                    }""", timeout=30000)
-                    
+                    await page.wait_for_function("() => document.querySelector('div[jsname=\"dsyhDe\"]')?.textContent?.trim().length > 0", timeout=30000)
                     print("✅ Caption UI is active. Injecting observer...")
 
-                    # Inject the improved MutationObserver
+                    # --- UPDATED JAVASCRIPT INJECTION ---
                     await page.evaluate("""() => {
-                        // State management
                         let lastSpeaker = 'Unknown Speaker';
                         let lastCaptionText = '';
                         let lastCaptionTime = 0;
                         const DUPLICATE_THRESHOLD_MS = 2000;
                         
-                        // Extract speaker name
                         const getSpeaker = (element) => {
                             try {
-                                // NEW SELECTOR based on debug output
                                 const speakerEl = element.querySelector('.NWpY1d');
-                                if (speakerEl) {
-                                    const name = speakerEl.textContent?.trim();
-                                    if (name && name.length > 0) {
-                                        lastSpeaker = name;
-                                        return name;
-                                    }
+                                if (speakerEl?.textContent?.trim()) {
+                                    lastSpeaker = speakerEl.textContent.trim();
+                                    return lastSpeaker;
                                 }
-                                return lastSpeaker; // Return the last known speaker if not found
-                            } catch (e) {
-                                console.error('[CAPTION] Error getting speaker:', e);
                                 return lastSpeaker;
-                            }
+                            } catch (e) { console.error('[CAPTION] Error getting speaker:', e); return lastSpeaker; }
                         };
                         
-                        // Extract caption text
                         const getCaptionText = (element) => {
                             try {
-                                // NEW SELECTOR based on debug output
                                 const textEl = element.querySelector('.ygicle');
-                                if (textEl) {
-                                    let text = textEl.textContent?.trim();
-                                    if (text) {
-                                        return text.replace(/\s+/g, ' ').trim();
-                                    }
-                                }
-                                return '';
-                            } catch (e) {
-                                console.error('[CAPTION] Error getting text:', e);
-                                return '';
-                            }
+                                return textEl ? textEl.textContent?.trim().replace(/\\s+/g, ' ').trim() : '';
+                            } catch (e) { console.error('[CAPTION] Error getting text:', e); return ''; }
                         };
                         
-                        // Send caption to backend
                         const sendCaption = (speaker, text) => {
                             try {
-                                if (!text) {
-                                    return;
-                                }
+                                if (!text || !window.MEETING_START_TIME) return;
                                 
-                                // Deduplication
                                 const now = Date.now();
-                                if (text === lastCaptionText && (now - lastCaptionTime) < DUPLICATE_THRESHOLD_MS) {
-                                    return;
-                                }
+                                if (text === lastCaptionText && (now - lastCaptionTime) < DUPLICATE_THRESHOLD_MS) return;
                                 
                                 lastCaptionText = text;
                                 lastCaptionTime = now;
                                 
-                                console.log(`[CAPTION-CLEAN] ${speaker}: ${text}`);
+                                // CALCULATE RELATIVE TIMESTAMP
+                                const elapsedSeconds = (now - window.MEETING_START_TIME) / 1000.0;
+                                
+                                console.log(`[CAPTION-CLEAN | ${elapsedSeconds.toFixed(2)}s] ${speaker}: ${text}`);
                                 
                                 if (window.onCaptionReceived) {
                                     window.onCaptionReceived({
                                         speaker: speaker,
                                         text: text,
-                                        timestamp: new Date().toISOString()
+                                        timestamp: elapsedSeconds // SEND RELATIVE TIME
                                     });
                                 }
-                            } catch (e) {
-                                console.error('[CAPTION] Error sending caption:', e);
-                            }
+                            } catch (e) { console.error('[CAPTION] Error sending caption:', e); }
                         };
                         
-                        // Process caption elements
                         const processElement = (element) => {
                             if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
-
-                            // We need to find the parent element that contains both speaker and text
                             const mainCaptionBlock = element.closest('.nMcdL');
                             if (mainCaptionBlock) {
                                 const speaker = getSpeaker(mainCaptionBlock);
                                 const text = getCaptionText(mainCaptionBlock);
-                                
-                                if (text && text.length >= 2) {
-                                    sendCaption(speaker, text);
-                                }
+                                if (text && text.length >= 2) { sendCaption(speaker, text); }
                             }
                         };
                         
-                        // Set up MutationObserver
                         const observer = new MutationObserver((mutations) => {
                             for (const mutation of mutations) {
-                                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-                                    mutation.addedNodes.forEach(node => {
-                                        if (node.nodeType === Node.ELEMENT_NODE) {
-                                            processElement(node);
-                                        }
-                                    });
-                                }
-                                
-                                if (mutation.type === 'characterData') {
+                                if (mutation.type === 'childList') {
+                                    mutation.addedNodes.forEach(node => processElement(node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement));
+                                } else if (mutation.type === 'characterData') {
                                     processElement(mutation.target.parentElement);
                                 }
                             }
                         });
                         
-                        // Observe caption container
                         const captionContainer = document.querySelector('div[jsname="dsyhDe"]');
                         if (captionContainer) {
-                            observer.observe(captionContainer, {
-                                childList: true,
-                                characterData: true,
-                                subtree: true
-                            });
+                            observer.observe(captionContainer, { childList: true, characterData: true, subtree: true });
                             console.log('[CAPTION-OBSERVER] Monitoring caption container');
                         } else {
-                            console.warn('[CAPTION-OBSERVER] Caption container not found, observing body');
-                            observer.observe(document.body, {
-                                childList: true,
-                                subtree: true
-                            });
+                            console.warn('[CAPTION-OBSERVER] Caption container not found!');
                         }
-                        
-                        console.log('[CAPTION-OBSERVER] Initialized with updated selectors');
                     }""")
                     
                     print("✅ Caption observer successfully injected and running.")
@@ -326,33 +262,22 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     print("❌ Timed out waiting for first caption. Recording audio only.")
                 except Exception as e:
                     print(f"❌ Error setting up caption observer: {e}")
-                    import traceback
-                    traceback.print_exc()
-
-            # Wait for initial captions
-            await asyncio.sleep(10)
-
-            # Main monitoring loop
+            
+            # Main monitoring loop remains the same...
             while True:
                 await asyncio.sleep(4)
-                
-                # Check if ffmpeg is still running
                 if recorder.poll() is not None:
                     print("❌ FFMPEG recorder process stopped unexpectedly. Ending meeting.")
                     break
-                
-                # Check for stop signal
                 try:
                     if job_status.get(job_id, {}).get("status") == "stopping":
                         print("⏹️ Stop signal received, leaving meeting.")
                         break
-                    
-                    # Check participant count
-                    locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]').first
+                    locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"]').first
                     await locator.wait_for(state="visible", timeout=3000)
                     count_text = await locator.get_attribute("aria-label") or ""
-                    match = re.search(r'\d+', count_text)
-                    if match and int(match.group()) <= 1:
+                    match = re.search(r'(\d+)', count_text)
+                    if match and int(match.group(1)) <= 1:
                         print("👤 Only 1 participant left. Ending recording.")
                         break
                 except (TimeoutError, AttributeError):
@@ -363,54 +288,41 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             job_status[job_id] = {"status": "failed", "error": f"An error occurred in the meeting: {e}"}
             await page.screenshot(path=os.path.join(output_dir, "error.png"))
         finally:
-            # Stop ffmpeg recorder
             if recorder and recorder.poll() is None:
                 print("🛑 Terminating ffmpeg recorder process...")
                 recorder.terminate()
-                try: 
-                    recorder.wait(timeout=5)
-                except subprocess.TimeoutExpired: 
-                    recorder.kill()
+                try: recorder.wait(timeout=5)
+                except subprocess.TimeoutExpired: recorder.kill()
                 print("✅ FFMPEG recorder stopped.")
             
-            # Leave the meeting
             try:
                 await page.get_by_role("button", name="Leave call").click(timeout=5000)
                 await asyncio.sleep(3)
-            except Exception: 
-                pass
+            except Exception: pass
             
             await browser.close()
 
-    # Post-processing: transcription, merging, and summarization
+    # Post-processing
     if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 4096:
         job_status[job_id] = {"status": "transcribing"}
         if transcribe_audio(output_audio_path, output_transcript_path):
             
-            # Merge captions with transcript
             job_status[job_id] = {"status": "merging_transcripts"}
-            print("🔄 Merging captions with STT transcript...")
+            print("🔄 Merging captions with STT transcript by time...")
             merged_transcript_path = os.path.join(output_dir, "merged_transcript.txt")
-            merge_success = False
             
-            try:
-                merge_success = merge_meeting_transcripts(job_id)
-                if merge_success:
-                    print("✅ Transcripts merged successfully")
-                    final_transcript_path = merged_transcript_path
-                else:
-                    print("⚠️ Merge failed, using STT transcript only")
-                    final_transcript_path = output_transcript_path
-            except Exception as e:
-                print(f"⚠️ Merge error: {e}. Using STT transcript only")
+            # --- USE NEW TIME-BASED MERGER ---
+            merge_success = merge_meeting_transcripts_by_time(job_id)
+            
+            if merge_success:
+                print("✅ Transcripts merged successfully")
+                final_transcript_path = merged_transcript_path
+            else:
+                print("⚠️ Merge failed, using STT transcript only")
                 final_transcript_path = output_transcript_path
             
-            # Summarize the final transcript
             job_status[job_id] = {"status": "summarizing"}
-            summarizer = WorkflowAgentProcessor(
-                base_url="https://shai.pro/v1", 
-                api_key="app-GMysC0py6j6HQJsJSxI2Rbxb"
-            )
+            summarizer = WorkflowAgentProcessor("https://shai.pro/v1", "app-GMysC0py6j6HQJsJSxI2Rbxb")
             file_id = await summarizer.upload_file(final_transcript_path)
             
             if file_id:
