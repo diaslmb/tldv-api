@@ -45,9 +45,9 @@ class MeetingRequest(BaseModel):
 
 # --- FIXED: Caption Model matching JavaScript payload ---
 class CaptionEvent(BaseModel):
-    speaker: str  # Changed from 'name' to 'speaker'
+    speaker: str
     text: str
-    timestamp: str
+    timestamp: float # CHANGED: from 'str' to 'float' to accept relative timestamps in seconds
 
 @app.post("/captions/{job_id}")
 async def receive_captions(job_id: str, event: CaptionEvent):
@@ -55,7 +55,6 @@ async def receive_captions(job_id: str, event: CaptionEvent):
     job = jobs.get(job_id)
     if not job:
         print(f"Warning: Received caption for unknown/completed job_id: {job_id}")
-        # Don't return error to avoid flooding logs
         return {"status": "received"}
 
     output_dir = os.path.join("outputs", job_id)
@@ -118,6 +117,12 @@ async def get_transcript(job_id: str):
     if not job: raise HTTPException(status_code=404, detail="Job not found")
     if job.get("status") != "completed": 
         raise HTTPException(status_code=400, detail=f"Job not complete. Status: {job.get('status')}")
+    
+    # --- UPDATED: Prioritize merged transcript ---
+    merged_transcript_path = job.get("merged_transcript_path")
+    if merged_transcript_path and os.path.exists(merged_transcript_path):
+        return FileResponse(merged_transcript_path, media_type='text/plain', filename='transcript.txt')
+        
     transcript_path = job.get("transcript_path")
     if not transcript_path or not os.path.exists(transcript_path): 
         raise HTTPException(status_code=404, detail="Transcript file not found.")
