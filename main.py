@@ -6,7 +6,7 @@ import teams_bot_logic
 import zoom_bot_logic
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 from typing import Annotated
 from pydantic.functional_validators import AfterValidator
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,25 +43,22 @@ jobs = {}
 class MeetingRequest(BaseModel):
     meeting_url: Url
 
-# --- FIXED: Caption Model matching JavaScript payload ---
 class CaptionEvent(BaseModel):
     speaker: str
     text: str
-    timestamp: float # CHANGED: from 'str' to 'float' to accept relative timestamps in seconds
+    timestamp: float # Accepts relative timestamps in seconds
 
 @app.post("/captions/{job_id}")
 async def receive_captions(job_id: str, event: CaptionEvent):
     """Receives caption data from the Playwright bot and saves it to a file."""
     job = jobs.get(job_id)
     if not job:
-        print(f"Warning: Received caption for unknown/completed job_id: {job_id}")
-        return {"status": "received"}
+        return {"status": "ignored"}
 
     output_dir = os.path.join("outputs", job_id)
     os.makedirs(output_dir, exist_ok=True)
     captions_file_path = os.path.join(output_dir, "captions.jsonl")
 
-    # Append caption as JSONL
     try:
         with open(captions_file_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(event.dict()) + "\n")
@@ -73,7 +70,6 @@ async def receive_captions(job_id: str, event: CaptionEvent):
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
-    """Serves the main HTML frontend."""
     html_file_path = 'index.html'
     if not os.path.exists(html_file_path):
         raise HTTPException(status_code=404, detail="index.html not found.")
@@ -84,7 +80,6 @@ async def read_root():
 async def start_meeting(request: MeetingRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "pending"}
-
     platform = get_platform(request.meeting_url)
 
     if platform == "google":
@@ -118,7 +113,7 @@ async def get_transcript(job_id: str):
     if job.get("status") != "completed": 
         raise HTTPException(status_code=400, detail=f"Job not complete. Status: {job.get('status')}")
     
-    # --- UPDATED: Prioritize merged transcript ---
+    # Prioritize serving the final merged transcript
     merged_transcript_path = job.get("merged_transcript_path")
     if merged_transcript_path and os.path.exists(merged_transcript_path):
         return FileResponse(merged_transcript_path, media_type='text/plain', filename='transcript.txt')
@@ -141,12 +136,9 @@ async def get_summary(job_id: str):
 
 @app.get("/captions/{job_id}")
 async def get_captions(job_id: str):
-    """Endpoint to retrieve saved captions for a job."""
     job = jobs.get(job_id)
     if not job: raise HTTPException(status_code=404, detail="Job not found")
-    
     captions_file_path = os.path.join("outputs", job_id, "captions.jsonl")
     if not os.path.exists(captions_file_path):
         raise HTTPException(status_code=404, detail="Captions file not found.")
-    
     return FileResponse(captions_file_path, media_type='application/x-ndjson', filename='captions.jsonl')
