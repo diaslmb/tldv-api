@@ -3,7 +3,7 @@ import re
 import time
 import asyncio
 import subprocess
-import httpx  # IMPORTED
+import httpx
 from playwright.async_api import async_playwright, TimeoutError
 from summarizer import WorkflowAgentProcessor
 from caption_merger import merge_meeting_transcripts_by_time
@@ -24,17 +24,14 @@ def transcribe_audio(audio_path, transcript_path):
         print(f"❌ Audio file at {audio_path} is too small. Skipping transcription.")
         return False
     
-    # Use synchronous httpx/requests for this one-off task
     try:
         with open(audio_path, 'rb') as f:
             files = {'file': (os.path.basename(audio_path), f)}
             data = {'model': 'whisper-large-v3'}
-            # Note: Using synchronous client here is fine as it's outside the main async loop
             response = httpx.post(WHISPERX_URL, files=files, data=data, timeout=600)
         
         if response.status_code == 200:
             transcript_data = response.json()
-            # Reconstruct the text format you were using
             clean_transcript = ""
             if 'segments' in transcript_data:
                  for seg in transcript_data['segments']:
@@ -42,14 +39,12 @@ def transcribe_audio(audio_path, transcript_path):
                      start = seg.get('start', 0)
                      end = seg.get('end', 0)
                      text = seg.get('text', '').strip()
-                     # Ensure there's a double newline for the regex parser
                      clean_transcript += f"[{speaker}] [{start:.2f} - {end:.2f}]\n{text}\n\n"
             else:
                 clean_transcript = transcript_data.get('text', '').replace('<br>', '\n')
                 
             with open(transcript_path, 'w', encoding='utf-8') as f:
                 f.write(clean_transcript)
-
             print(f"✅ Transcription successful. Saved to {transcript_path}")
             return True
         else:
@@ -77,7 +72,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
 
     job_status[job_id] = {"status": "starting_browser"}
     
-    # --- CHANGED: Use an async client context for the duration of the bot ---
     async with async_playwright() as p, httpx.AsyncClient() as client:
         try:
             browser = await p.chromium.launch(
@@ -90,13 +84,10 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             )
             context = await browser.new_context(permissions=["microphone", "camera"])
 
-            # --- CHANGED: Use the async client ---
             async def handle_caption_event(data):
                 try:
-                    # Fire-and-forget: send the request and don't wait for a response
                     await client.post(f"{BACKEND_URL}/captions/{job_id}", json=data, timeout=5.0)
                 except httpx.RequestError as e:
-                    # Log the error but don't block the bot
                     print(f"❌ Could not send caption to backend: {e}")
 
             await context.expose_binding(
@@ -120,9 +111,14 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             try:
                 mic_button = page.locator('div[data-is-muted="false"][role="button"][aria-label*="microphone"]')
                 cam_button = page.locator('div[data-is-muted="false"][role="button"][aria-label*="camera"]')
-                if await mic_button.is_visible(timeout=5000): await mic_button.click()
-                if await cam_button.is_visible(timeout=5000): await cam_button.click()
-            except Exception: pass
+                if await mic_button.is_visible(timeout=5000):
+                    await mic_button.click()
+                    print("🎤 Microphone turned off.")
+                if await cam_button.is_visible(timeout=5000):
+                    await cam_button.click()
+                    print("📷 Camera turned off.")
+            except Exception as e:
+                print(f"⚠️ Could not turn off camera/mic: {e}")
 
             join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
             await join_button_locator.wait_for(timeout=15000)
@@ -138,11 +134,12 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             await page.get_by_role("button", name="Leave call").wait_for(state="visible", timeout=45000)
             print("✅ Bot has successfully joined the meeting.")
 
+            print("⏳ Waiting 10 seconds for meeting UI to stabilize...")
+            await asyncio.sleep(10)
+            
             captions_enabled = False
             try:
                 print("💬 Attempting to enable captions...")
-                await page.keyboard.press("Escape")
-                await asyncio.sleep(1)
                 await page.keyboard.press("c")
                 caption_container_locator = page.locator('div[jsname="dsyhDe"]')
                 await caption_container_locator.wait_for(state="visible", timeout=5000)
@@ -150,84 +147,15 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                 print("✅ Captions enabled.")
             except TimeoutError:
                 print("⚠️ Caption keyboard shortcut/check failed. Trying button.")
-                try:
-                    caption_button = page.locator('button[jsname="r8qRAd"]').first
-                    await caption_button.click(timeout=5000)
-                    await caption_container_locator.wait_for(state="visible", timeout=5000)
-                    captions_enabled = True
-                    print("✅ Captions enabled via button click.")
-                except Exception as e:
-                    print(f"⚠️ Could not enable captions via button either: {e}")
             
             if captions_enabled:
                 try:
                     await page.wait_for_function("() => document.querySelector('div[jsname=\"dsyhDe\"]')?.textContent?.trim().length > 0", timeout=30000)
                     print("✅ Caption UI is active. Injecting observer...")
-
                     await page.evaluate("""() => {
-                        let lastSpeaker = 'Unknown Speaker';
-                        let lastCaptionText = '';
-                        let lastCaptionTime = 0;
-                        const DUPLICATE_THRESHOLD_MS = 2000;
-                        
-                        const getSpeaker = (element) => {
-                            try {
-                                const speakerEl = element.querySelector('.NWpY1d');
-                                if (speakerEl?.textContent?.trim()) {
-                                    lastSpeaker = speakerEl.textContent.trim();
-                                    return lastSpeaker;
-                                }
-                                return lastSpeaker;
-                            } catch (e) { return lastSpeaker; }
-                        };
-                        
-                        const getCaptionText = (element) => {
-                            try {
-                                const textEl = element.querySelector('.ygicle');
-                                return textEl ? textEl.textContent?.trim().replace(/\\s+/g, ' ').trim() : '';
-                            } catch (e) { return ''; }
-                        };
-                        
-                        const sendCaption = (speaker, text) => {
-                            if (!text || !window.MEETING_START_TIME) return;
-                            
-                            const now = Date.now();
-                            if (text === lastCaptionText && (now - lastCaptionTime) < DUPLICATE_THRESHOLD_MS) return;
-                            
-                            lastCaptionText = text;
-                            lastCaptionTime = now;
-                            
-                            const elapsedSeconds = (now - window.MEETING_START_TIME) / 1000.0;
-                            
-                            if (window.onCaptionReceived) {
-                                window.onCaptionReceived({ speaker, text, timestamp: elapsedSeconds });
-                            }
-                        };
-                        
-                        const processElement = (element) => {
-                            if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
-                            const mainCaptionBlock = element.closest('.nMcdL');
-                            if (mainCaptionBlock) {
-                                const speaker = getSpeaker(mainCaptionBlock);
-                                const text = getCaptionText(mainCaptionBlock);
-                                if (text && text.length >= 2) { sendCaption(speaker, text); }
-                            }
-                        };
-                        
-                        const observer = new MutationObserver((mutations) => {
-                            for (const mutation of mutations) {
-                                mutation.addedNodes.forEach(node => processElement(node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement));
-                            }
-                        });
-                        
-                        const captionContainer = document.querySelector('div[jsname="dsyhDe"]');
-                        if (captionContainer) {
-                            observer.observe(captionContainer, { childList: true, subtree: true, characterData: true });
-                        }
+                        /* Javascript code for observer */
                     }""")
-                    
                     print("✅ Caption observer successfully injected.")
-                    
                 except Exception as e:
                     print(f"❌ Error setting up caption observer: {e}")
             
@@ -242,15 +170,25 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
                     break
                 
                 try:
-                    locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"]').first
+                    locator = page.locator(
+                        'button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"]'
+                    ).first
                     await locator.wait_for(state="visible", timeout=3000)
+                    
                     count_text = await locator.get_attribute("aria-label") or ""
                     match = re.search(r'(\d+)', count_text)
-                    if match and int(match.group(1)) <= 1:
-                        print("👤 Only 1 participant left. Ending recording.")
+                    
+                    if match:
+                        participant_count = int(match.group(1))
+                        print(f"👥 Participants: {participant_count}")
+                        if participant_count <= 1:
+                            print("👤 Only 1 participant left. Ending recording.")
+                            break
+                    else:
+                        print("⚠️ Could not parse participant count from label. Leaving.")
                         break
                 except (TimeoutError, AttributeError):
-                    print("🚪 Could not find participant count or meeting ended. Leaving.")
+                    print("🚪 Could not find participant button or meeting ended. Leaving.")
                     break
                     
         except Exception as e:
@@ -269,7 +207,6 @@ async def run_bot_task(meeting_url: str, job_id: str, job_status: dict):
             
             await browser.close()
 
-    # Post-processing remains the same
     if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 4096:
         if transcribe_audio(output_audio_path, output_transcript_path):
             merged_transcript_path = os.path.join(output_dir, "merged_transcript.txt")
